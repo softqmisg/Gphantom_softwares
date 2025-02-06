@@ -1,0 +1,9 @@
+#windows
+conda create -n phantom_v2 python=3.10
+pip install simpleitk==2.2.1
+pip install dicom2nifti==2.4.11
+conda install conda-forge::pydicom=2.4.4
+pip install matplotlib==3.8.4
+pip install scikit-image==0.24.0
+pip intsall numpy==1.26.4
+
