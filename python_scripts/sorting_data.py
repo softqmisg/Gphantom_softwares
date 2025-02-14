@@ -22,7 +22,7 @@ template_query_read_directory="SELECT * FROM uploads WHERE id={id}"
 template_query_write_save_info_directory="INSERT  INTO studies (userId,info,directory,status,created_at) VALUES ({userId},\"{metadata}\",\"{directory}\",\"non\",\"{created_at}\")"
 
 # BaseAddress="/home/mehdi/Documents/Gphantom2/python_scripts/dicoms"
-BaseAddress="E:/PostDoc/__Works/Dr.Fatemi/G_phantom/Software/Gphantom2/python_scripts/dicoms"
+BaseAddress="E:/PostDoc/__Works/Dr.Fatemi/G_phantom/Software/dicoms"
 db_host="127.0.0.1"
 db_port=3306
 db_name="phantom_db_v2"

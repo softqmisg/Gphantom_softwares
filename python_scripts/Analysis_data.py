@@ -44,7 +44,7 @@ template_query_write_save_curve="UPDATE studies SET \
 
 CT_reference=""
 # BaseAddress="/home/mehdi/Documents/Gphantom2/python_scripts/dicoms"
-BaseAddress="E:/PostDoc/__Works/Dr.Fatemi/G_phantom/Software/Gphantom2/python_scripts/dicoms"
+BaseAddress="E:/PostDoc/__Works/Dr.Fatemi/G_phantom/Software/dicoms"
 
 db_host="127.0.0.1"
 db_port=3306
