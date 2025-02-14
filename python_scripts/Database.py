@@ -1,7 +1,7 @@
 from mysql.connector import connect as sqlConnect
 from mysql.connector import pooling
 from mysql.connector import Error as sqlError
-
+import logging
 
 
 class DataBase():
@@ -27,20 +27,19 @@ class DataBase():
                                                                 user=user,
                                                                 password=password
                                                                 )
-                    print("Connection Pool Name - ", connection_pool.pool_name)
+                    logging.info(f"Connection Pool Name - { connection_pool.pool_name}")
                     self.connection_object=connection_pool.get_connection() #get object from connection
                     self.cursordb=self.connection_object.cursor() #get cursor for survey of database
                     break
                 except sqlError as err:
-                        print("error:"+ err.msg)  
-                        print("Retrying to connect to the database")
-                        print(".......")
+                        logging.error(f"error:{ err.msg}")  
+                        logging.warn("Retrying to connect to the database")
         except KeyboardInterrupt:
-            print("Exiting App")
+            logging.critical("Exiting App")
         return
 
     def close(self):
-        print("close Database")
+        logging.info("close Database")
         self.cursordb.close()
         self.connection_object.close()         
 
@@ -48,7 +47,7 @@ class DataBase():
         while(True):
             try:
                 if(verbose):
-                    print('>>>Read query:',query)
+                    logging.info(f">>>Read query:{query}")
                 self.cursordb.execute(query) #execute query
                 queryresults = self.cursordb.fetchall() #and fetch results
                 if(verbose):
@@ -58,8 +57,8 @@ class DataBase():
                 data = [dict(zip(column_names, row)) for row in queryresults]
                 return data
             except sqlError as err:
-                print("failed run query! close database and try to reconnect database")
-                print("error:"+ err.msg)  
+                logging.error("failed run query! close database and try to reconnect database")
+                logging.error(f"error:{ err.msg}")  
                 self.close()
                 self.connect(self.host,self.database,self.user,self.password,self.port)
     
@@ -67,13 +66,13 @@ class DataBase():
         while(True):
             try:
                 if(verbose):
-                    print('>>>Write query:',query)
+                    logging.info(f'>>>Write query:{query}')
                 self.cursordb.execute(query) 
                 self.connection_object.commit()  #commit after writing             
                 break
             except sqlError as err:
-                print("failed run query! close database and try to reconnect database")
-                print("error:"+ err.msg)
+                logging.error("failed run query! close database and try to reconnect database")
+                logging.error(f"error:{ err.msg}")
                 self.close()
                 self.connect(self.host,self.database,self.user,self.password,self.port)              
          

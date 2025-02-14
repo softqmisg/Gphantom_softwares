@@ -41,7 +41,7 @@ template_query_write_save_scatters={'dist_x':"UPDATE studies SET \
                                           dist_y=\"{dist}\"\
                                           WHERE id={id}",
                                     'dist_z':"UPDATE studies SET \
-                                          dist_y=\"{dist}\"\
+                                          dist_z=\"{dist}\"\
                                           WHERE id={id}",                                          
                                     'dist_total':"UPDATE studies SET \
                                           dist_total=\"{dist}\"\
@@ -53,7 +53,7 @@ template_query_write_save_distortions="UPDATE studies SET \
                                           WHERE id={id}"
 
 template_query_write_save_gridpositions="UPDATE studies SET \
-                                          grids=\"{grids}\"\
+                                          gridspos=\"{grids}\"\
                                           WHERE id={id}"
 
 template_query_write_save_statistics="UPDATE studies SET \
@@ -89,8 +89,11 @@ db_user="root" #"debian-sys-maint"
 db_password="" #"Vmz8JKxbWusTLhio"
 
 ##################################################################################
+'''
+    Helper for saving NumPy arrays in JSON
+'''
 class NumpyEncoder(json.JSONEncoder):
-    """Helper for saving NumPy arrays in JSON."""
+    
     def default(self, obj):
         if isinstance(obj, np.ndarray):
             return obj.tolist()  # Convert NumPy array to list
@@ -112,8 +115,8 @@ class analysisData:
         self.currentId_mri=currentId_mri
         self.analyze_Directory=mri_analyze_Directory
         self.start_analysis(ct_nifti_path,mri_nifti_path,
-                            ct_intensity_range=(0, 100),
-                            mri_intensity_range=(200, 1000),
+                            ct_intensity_range=(0, 1000),
+                            mri_intensity_range=(0, 100),
                             tolerance_mm=5.0,
                             threshold_mm=5.0
                             )
@@ -122,6 +125,11 @@ class analysisData:
         Image Tools function
     '''
      ##########################
+    
+    #############################
+    #      Utility Functions    #
+    #############################    
+    
     def convert_ndarray_to_list(self,data):
         """
          Recursively convert numpy arrays to lists in a nested dictionary or list.
@@ -135,10 +143,14 @@ class analysisData:
             return data.tolist()
         else:
             return data
+    
     #############################
-    # Function to load NIfTI images and extract the 3D volume
-    #  Image I/O and Loading   #
+    # Function to load NIfTI    #
+    # images and extract the 3D #
+    # volume  Image I/O and     #
+    # Loading                   #
     ############################# 
+        
     def load_nifti_image(self,file_path):
         """
         Loads a NIfTI image using SimpleITK and returns:
@@ -162,19 +174,31 @@ class analysisData:
         physical_center = origin + direction.dot(center_voxel * spacing)
 
         return image, spacing, physical_center, nifti_data
+    ##################################################################################
+    """
+          Preprocessing        
+    """
     #############################
-    #      Preprocessing        #
+    # Clip intensity of the CT  #
+    # and MRI images separately #
     #############################
-    # Clip intensity of the CT and MRI images separately
+    
     def clip_intensity(self,image, intensity_range):
         """
         Clamps (clips) the intensities of 'image' to [min_val, max_val].
         """        
+        max=np.amax(image)
+        min=np.amin(image)
+        logging.info(f"Max:{max} Min:{min}")
         min_val, max_val = intensity_range
         clipped_image = np.clip(image, min_val, max_val)
         return clipped_image 
-    #################################
-    # Remove regions outside the squared phantom
+    
+    #############################
+    # Remove regions outside    #
+    # the squared phantom       #
+    #############################
+
     def remove_outside_regions(self,image):
         """
         Uses Otsu thresholding + largest connected component to identify phantom region.
@@ -194,7 +218,7 @@ class analysisData:
         regions = measure.regionprops(labeled_image)
 
         if not regions:
-            logging.error("No regions found after thresholding and removing small objects.")
+            logging.error("No regions found after thresholding and removing small objects!")
             return image, np.ones_like(image, dtype=bool), [], [], []
 
         # Find the largest region, assuming it's the phantom
@@ -218,6 +242,7 @@ class analysisData:
     #############################
     #   Grid Cross Detection    #
     #############################    
+    
     def detect_plus_like_cross_sections(self,image_3d, image_type='CT'):
         """
         Detects "+"-like cross-sections in a 3D image.
@@ -250,69 +275,6 @@ class analysisData:
         # For example, validate local cross-like structures around each peak
 
         return coordinates  # in (z, y, x)
-    ###############################
-    def detect_plus_like_cross_sections_3D_MRI(self,image_3d):
-        # image_3d = gaussian_filter(image_3d, sigma=3)
-
-
-        # Create a 3D "+"-like kernel (cross shape)
-        plus_kernel = np.zeros((9, 9, 9))  # 7x7x7 kernel size, adjust as needed
-        center = 4  # Center of the kernel (middle of the 7x7x7 cube)
-
-        # Define the "+" structure in the x, y, and z directions
-        plus_kernel[center, :, center] = 1  # Vertical line in the y-axis
-        plus_kernel[:, center, center] = 1  # Vertical line in the x-axis
-        plus_kernel[center, center, :] = 1  # Vertical line in the z-axis
-
-        # Perform cross-correlation between the image and the "+" kernel
-        response = correlate(image_3d, plus_kernel)
-
-        # Threshold the response to keep only strong matches (high correlation values)
-        response_thresholded = response > np.percentile(response,
-                                                        99)  # Keeping top 1% of responses, adjust as necessary
-
-        # Remove small objects to clean up noise
-        response_clean = morphology.remove_small_objects(response_thresholded, min_size=3)
-
-        # Use labeled image to find coordinates of the intersecting regions
-        labeled_plus = measure.label(response_clean)
-        intersection_props = measure.regionprops(labeled_plus)
-
-        # Get the coordinates of the centers of the "+" like cross-sections
-        centers = np.array([prop.centroid for prop in intersection_props])
-        return centers
-    ###############################
-    def detect_plus_like_cross_sections_3D_CT(self,image_3d):
-        # image_3d = gaussian_filter(image_3d, sigma=7)
-        # Create a 3D "+"-like kernel (cross shape)
-        plus_kernel = np.zeros((5, 5, 5))  # 7x7x7 kernel size, adjust as needed
-        center = 2  # Center of the kernel (middle of the 7x7x7 cube)
-
-        # Define the "+" structure in the x, y, and z directions (inverted kernel for detecting low-intensity regions)
-        plus_kernel[center, :, center] = -1  # Vertical line in the y-axis (negative values for dark areas)
-        plus_kernel[:, center, center] = -1  # Vertical line in the x-axis
-        plus_kernel[center, center, :] = -1  # Vertical line in the z-axis
-
-        # Fill surroundings with positive values to ensure the "+" structure is detected as darker than surroundings
-        plus_kernel[plus_kernel == 0] = 1
-
-        # Perform cross-correlation between the image and the "+" kernel
-        response = correlate(image_3d, plus_kernel)
-
-        # Threshold the response to keep only strong matches (high correlation values)
-        response_thresholded = response > np.percentile(response,
-                                                        99)  # Keeping top 1% of responses, adjust as necessary
-
-        # Remove small objects to clean up noise
-        response_clean = morphology.remove_small_objects(response_thresholded, min_size=5)
-
-        # Use labeled image to find coordinates of the intersecting regions
-        labeled_plus = measure.label(response_clean)
-        intersection_props = measure.regionprops(labeled_plus)
-
-        # Get the coordinates of the centers of the "+" like cross-sections
-        centers = np.array([prop.centroid for prop in intersection_props])
-        return centers
     ##################################################################################
     '''
         Analysis
@@ -320,7 +282,10 @@ class analysisData:
     #############################
     #     Matching Points       #
     #############################
-    def compute_common_distances(points_img1, points_img2, spacing1, spacing2, tolerance_mm=5.0, verbose=False):
+    
+    def compute_common_distances(self,points_img1, points_img2,
+                                  spacing1, spacing2,
+                                    tolerance_mm=5.0, verbose=False):
         """
         Compute 1-to-1 matches between two sets of 3D points using spatial tolerance.
         Spacing is used to convert voxel distances to physical distances.
@@ -355,10 +320,12 @@ class analysisData:
             logging.info(f"Found {len(common1)} matched points.")
 
         return np.array(common1), np.array(common2)
+
     #############################
     #   Distortion Computation  #
     #############################
-    def compute_distortions(common_img1, common_img2, spacing1, spacing2):
+    
+    def compute_distortions(self,common_img1, common_img2, spacing1, spacing2):
         """
         Computes distortions between matched points.
         Returns arrays of distortions in x, y, z, and total distance.
@@ -374,8 +341,8 @@ class analysisData:
         dist_r = np.linalg.norm(distortions, axis=1)
 
         return dist_x, dist_y, dist_z, dist_r, common1_mm, common2_mm
-
-    def summarize_distortions(dist_x, dist_y, dist_z, dist_r, threshold_mm=5.0):
+    #############################
+    def summarize_distortions(self,dist_x, dist_y, dist_z, dist_r, threshold_mm=5.0):
         """
         Generates summary statistics for distortions.
         """
@@ -499,6 +466,7 @@ class analysisData:
     #############################
     #   Slice-Based Distortion  #
     #############################    
+
     def compute_slice_distortions(self,common_img1, common_img2, spacing1, spacing2,
                                 threshold_mm=None, output_file=None, percentage_threshold=1.0):
         """
@@ -710,47 +678,13 @@ class analysisData:
                 np.array(matched_dr))
 
     ##################################################################################
-    
     '''
         JSON Saving Functions
     '''  
     #############################
     #   Creating Dist. Maps     #
     #############################
-    def save_distortion_scatter_json(self,common_img1_mm, distortions, isocenter, output_dir):
-        """
-        Saves distortion_scatter_{component}.json files similar to the original code.
-        """
-        components = ['dist_x', 'dist_y', 'dist_z', 'dist_total']
-        for component in components:
-            self.generate_distortion_plot_from_isocenter(common_img1_mm, distortions, isocenter,
-                                                    component=component, save_path=output_dir)
-          
-    #############################
-    def save_grid_position_json(self,common_img1_vox, output_dir):
-        """
-        Saves grid_position.json similar to the original code.
-        'common_img1_vox' is in (z,y,x) voxel coordinates.
-        """
-        centers = common_img1_vox
-        z_coords = centers[:, 0]
-        y_coords = centers[:, 1]
-        x_coords = centers[:, 2]
-        series_metadata = {
-            "z_coords": z_coords.tolist(),
-            "y_coords": y_coords.tolist(),
-            "x_coords": x_coords.tolist(),
-        }
-        out_json = os.path.join(output_dir, "grid_position.json")
-        with open(out_json, 'w') as json_file:
-            json.dump(series_metadata, json_file, indent=4, cls=NumpyEncoder)
-        logging.info(f"[INFO] Saved grid positions to {out_json}")
-        self.mydatabase.write_query(template_query_write_save_gridpositions.format(id=self.currentId_mri,
-                                                                                    grids=series_metadata
-                                                                                    )
-                                    )  
     
-    ##############################
     def create_and_save_all_distortion_maps(self,sorted_slice_distortions,
                                             reference_sitk_image,
                                             output_dir,
@@ -850,7 +784,43 @@ class analysisData:
                 map3Ddistpath=Map3DdistPathJSON
             )
         )        
+    
     #############################
+    #     Slice-Based JSON      #
+    #############################
+
+    def save_distortion_scatter_json(self,common_img1_mm, distortions, isocenter, output_dir):
+        """
+        Saves distortion_scatter_{component}.json files similar to the original code.
+        """
+        components = ['dist_x', 'dist_y', 'dist_z', 'dist_total']
+        for component in components:
+            self.generate_distortion_plot_from_isocenter(common_img1_mm, distortions, isocenter,
+                                                    component=component, save_path=output_dir)
+    #############################
+    def save_grid_position_json(self,common_img1_vox, output_dir):
+        """
+        Saves grid_position.json similar to the original code.
+        'common_img1_vox' is in (z,y,x) voxel coordinates.
+        """
+        centers = common_img1_vox
+        z_coords = centers[:, 0]
+        y_coords = centers[:, 1]
+        x_coords = centers[:, 2]
+        series_metadata = {
+            "z_coords": z_coords.tolist(),
+            "y_coords": y_coords.tolist(),
+            "x_coords": x_coords.tolist(),
+        }
+        out_json = os.path.join(output_dir, "grid_position.json")
+        with open(out_json, 'w') as json_file:
+            json.dump(series_metadata, json_file, indent=4, cls=NumpyEncoder)
+        logging.info(f"[INFO] Saved grid positions to {out_json}")
+        self.mydatabase.write_query(template_query_write_save_gridpositions.format(id=self.currentId_mri,
+                                                                                    grids=series_metadata
+                                                                                    )
+                                    )  
+    ##############################
     def save_distortions_per_slice_json(self,sorted_slice_distortions, output_dir):
         """
         Saves distortions_per_slice.json similar to the original code.
@@ -859,28 +829,12 @@ class analysisData:
         with open(out_json, 'w') as f:
             json.dump(self.convert_ndarray_to_list(sorted_slice_distortions), f, indent=4)
         logging.info(f"[INFO] Distortions per slice saved to {out_json}")
-    ##############################
-    # def save_scatter(self,centers, target_path):
-    #     centers = np.array(centers)
-    #     z_coords = centers[:, 2]
-    #     y_coords = centers[:, 1]
-    #     x_coords = centers[:, 0]
-    #     series_metadata = {
-    #         "z_coords": z_coords,
-    #         "y_coords": y_coords,
-    #         "x_coords": x_coords,
-    #     }
-    #     # data_serializable = {k: convert_numpy_to_native(v) if isinstance(v, (np.ndarray, np.generic)) else v for k, v in
-    #     #                      series_metadata.items()}
-    #     #
-    #     with open(os.path.join(target_path, "grid_position.json"), 'w') as json_file:
-    #         json.dump(series_metadata, json_file, indent=4, cls=NumpyEncoder)
 
     ##################################################################################
     '''
     Start Analysis
     '''
-    ##################################################################################    
+    ##############################
     def start_analysis(self,ct_file_path,mri_file_path,
          ct_intensity_range=(0, 100),
          mri_intensity_range=(200, 1000),
@@ -892,11 +846,12 @@ class analysisData:
         try:
             if(ct_file_path!=""):
                 ct_image, ct_spacing, ct_isocenter, ct_sitk = self.load_nifti_image(ct_file_path)
+                logging.info(f'ct_pacing:{ct_spacing}')
         except Exception as e:
             logging.error(f"Unexpected error  in loading CT:'{ct_file_path}': {e}")
         try:
             mri_image, mri_spacing, mri_isocenter, mri_sitk = self.load_nifti_image(mri_file_path)
-
+            logging.info(f'mri_spacing:{mri_spacing}')
         except Exception as e:
             logging.error(f"Unexpected error  in loading MRI:'{mri_file_path}': {e}")            
 
@@ -906,18 +861,20 @@ class analysisData:
         clipped_mri = self.clip_intensity(mri_image, mri_intensity_range)  # Clip MRI between 0 and 1000
 
         # 3) Mask out outside region from MRI and apply same mask to CT
-        logging.info("Removing outside regions...")
+        logging.info("3. Removing outside regions...")
         mri_phantom, mask, _, _, _ = self.remove_outside_regions(clipped_mri)
         ct_phantom = clipped_ct * mask
 
         # 4) Detect cross-sections
+        logging.info("4. Detect cross-sections...")
         ct_intersections_vox = self.detect_plus_like_cross_sections(ct_phantom, image_type='CT')
         mri_intersections_vox = self.detect_plus_like_cross_sections(mri_phantom, image_type='MRI')
         logging.info(f"CT intersections detected: {ct_intersections_vox.shape[0]}")
         logging.info(f"MRI intersections detected: {mri_intersections_vox.shape[0]}")
 
         # 5) Match points (in voxel space) with a certain tolerance
-        logging.info("Matching grid intersection points between CT and MRI...")
+        logging.info("5. Matching grid intersection points between CT and MRI...")
+
         ct_matched_vox, mri_matched_vox = self.compute_common_distances(
             ct_intersections_vox,
             mri_intersections_vox,
@@ -925,13 +882,13 @@ class analysisData:
             spacing2=mri_spacing,
             tolerance_mm=tolerance_mm,
             verbose=True
-        )
+            )
         if len(ct_matched_vox) == 0:
             logging.error("No matched points found. Exiting.")
             return
 
         # 6) Compute distortions
-        logging.info("Computing distortions between matched points...")
+        logging.info("6. Computing distortions between matched points...")
         dist_x, dist_y, dist_z, dist_r, ct_matched_mm, mri_matched_mm = self.compute_distortions(
             ct_matched_vox,
             mri_matched_vox,
@@ -942,6 +899,7 @@ class analysisData:
         logging.info(f"Saved distortion summary to statistics  in DB")
 
         # 7) Generate and save visualizations
+        logging.info("7. Generate and save visualizations...")
         histfigpath=self.plot_distortions(dist_x, dist_y, dist_z, dist_r, self.analyze_Directory)
         # save distortion summary JSON
         self.mydatabase.write_query(
@@ -961,6 +919,7 @@ class analysisData:
         )
         
         # 8) Save matched points and distortions
+
         matched_points = {
             'CT_matched_points_mm': ct_matched_mm.tolist(),
             'MRI_matched_points_mm': mri_matched_mm.tolist(),
@@ -978,10 +937,10 @@ class analysisData:
                 matchpointpath=matched_points_path
             )
         )
-        logging.info(f"Saved matched points and distortions to {matched_points_path}")
+        logging.info(f"8. Saved matched points and distortions to {matched_points_path}")
 
         # 9) Compute and save slice-based distortions
-        logging.info("Computing slice-based distortions...")
+        logging.info("9. Computing slice-based distortions...")
 
         sorted_slice_distortions=self.compute_slice_distortions(
             common_img1=ct_matched_vox,
@@ -993,7 +952,7 @@ class analysisData:
             percentage_threshold= 1.0,
             )
         # 10) Generate and save distortion scatter JSON files
-        logging.info("Generating distortion scatter JSON files...")
+        logging.info("10. Generating distortion scatter JSON files...")
         distortions = np.stack((dist_x, dist_y, dist_z), axis=1)
         self.save_distortion_scatter_json(
             common_img1_mm=ct_matched_mm,
@@ -1002,13 +961,13 @@ class analysisData:
             output_dir=self.analyze_Directory
             )
         # 11) Save grid positions
-        logging.info("Saving grid positions...")
+        logging.info("11. Saving grid positions...")
         self.save_grid_position_json(
             common_img1_vox=ct_matched_vox,
             output_dir=self.analyze_Directory
         )
         # 12) Create and save distortion maps
-        logging.info("Creating 3D distortion maps (dx, dy, dz, dr)...")
+        logging.info("12. Creating 3D distortion maps (dx, dy, dz, dr)...")
         self.create_and_save_all_distortion_maps(
             sorted_slice_distortions=sorted_slice_distortions,
             reference_sitk_image=ct_sitk,
@@ -1019,6 +978,7 @@ class analysisData:
             mask=mask,
         )
         # 13) (Optional) Compute mutual nearest distances and log stats
+        logging.info("13. Compute mutual nearest distances and log stats...")
         dist_x_mutual, dist_y_mutual, dist_z_mutual, dist_r_mutual = self.compute_mutual_nearest_distances(
             ct_matched_vox,
             mri_matched_vox,
@@ -1042,18 +1002,17 @@ class analysisData:
 
         logging.info("Processing complete.")
 
-
 ##############################################################################################################
 '''
     Class of registeration CT/MRI. MRI registered to CT
 '''
 class registerImages:
     def __init__(self,ct_nifti_path=None,mri_nifti_path=None,registered_mri_nifti_path=None):
-        print("=======================")
-        print(ct_nifti_path)
-        print(mri_nifti_path)
-        print(registered_mri_nifti_path)
-        print("=======================")
+        # print("=======================")
+        # print(ct_nifti_path)
+        # print(mri_nifti_path)
+        # print(registered_mri_nifti_path)
+        # print("=======================")
         self.start_register(ct_nifti_path,mri_nifti_path,registered_mri_nifti_path)
     '''
         Registeration Tools
@@ -1153,25 +1112,27 @@ class registerImages:
 '''
     Find Name of files and call rgisteration the analysis
 '''       
-def main():
+def main(id=-1):
     logging.basicConfig(level=logging.NOTSET,format='%(asctime)s:%(levelname)s: %(message)s')
     id_ct=0
     id_mri=0
-    if(len(sys.argv)<2):
-        logging.error("Syntax")
+    if(len(sys.argv)<2 and id==-1):
+        logging.error("Syntax: Analysis_data.py [<id_ct>] <id_mri>")
         return 
     elif (len(sys.argv)==2):
         id_mri=sys.argv[1]
-    else:
+    elif (len(sys.argv)>2):
         id_ct=int(sys.argv[1])
         id_mri=int(sys.argv[2])
+    else :
+        id_mri=id
     ##############################################################################
     ### Find Path and Name of Files
     mydatabase=DataBase(host=db_host,port=db_port,database=db_name,user=db_user,password=db_password)
     currentId_ct=id_ct
     currentId_mri=id_mri
-    logging.info('current ct Id:',currentId_ct)
-    logging.info('current mri Id:',currentId_mri)
+    logging.info(f'current ct Id:{currentId_ct}')
+    logging.info(f'current mri Id:{currentId_mri}')
     if (currentId_ct != 0):
         readid_ct=mydatabase.read_query(template_query_read_directory.format(id=currentId_ct))
         ct_Directory=readid_ct[0]['directory']
@@ -1183,7 +1144,7 @@ def main():
     else:
         ct_nifti_file=CT_reference
     ct_nifti_file=f'{ct_nifti_file}'.replace('\\','\\\\')
-    logging.info(">>>>>>CT File:",ct_nifti_file)  
+    logging.info(f">>>>>>CT File:{ct_nifti_file}")  
 
     readid_mri=mydatabase.read_query(template_query_read_directory.format(id=currentId_mri))
     mri_Directory=readid_mri[0]['directory']
@@ -1192,7 +1153,7 @@ def main():
     mri_nifti_files=[f for f in os.listdir(mri_nifti_Directory) if (f.endswith('.nii.gz')and (not f.startswith('registeredImage_')))]
     mri_nifti_file=os.path.join(mri_nifti_Directory,mri_nifti_files[0])
     mri_nifti_file=f'{mri_nifti_file}'.replace('\\','\\\\')
-    logging.info(">>>>>>MRI File:",mri_nifti_file)  
+    logging.info(f">>>>>>MRI File: {mri_nifti_file}")  
     mri_analyze_Directory=os.path.join(Path(mri_Directory),'analyze')
     os.makedirs(mri_analyze_Directory,exist_ok=True)
     ##############################################################################
@@ -1206,11 +1167,11 @@ def main():
     registered_mri_nifti_file=os.path.join(mri_nifti_Directory,'registeredImage_'+mri_nifti_files[0])
     registered_mri_nifti_file=f'{registered_mri_nifti_file}'.replace('\\','\\\\')
     registerImages(ct_nifti_path=ct_nifti_file,mri_nifti_path=mri_nifti_file,registered_mri_nifti_path=registered_mri_nifti_file)
-    logging.info("Registeration was done!!!!")
+    logging.info("A. Registeration was done!!!!")
     ##############################################################################
     ###  Analysis
     analysisData(mydatabase,currentId_mri,mri_analyze_Directory,ct_nifti_path=ct_nifti_file,mri_nifti_path=registered_mri_nifti_file)
-    logging.info("Analysis was done!!!!")
+    logging.info("B. Analysis was done!!!!")
     ##############################################################################
     ### Write end of analysis in DB
     mydatabase.write_query(template_query_write_save_status.format(id=currentId_mri,
@@ -1221,5 +1182,5 @@ def main():
     ##################################################################################
 
 if __name__=="__main__":
-    main()
+    main(93)
     sys.exit()

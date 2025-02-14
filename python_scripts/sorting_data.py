@@ -255,17 +255,20 @@ class sortData:
 
 
 
-def main():
+def main(id=-1):
     # print(pydicom.__version__)
     # sorting = sortData(id=1)
-
-    print(len(sys.argv))
-    if(len(sys.argv)<2):
+    if(len(sys.argv)<2 and id ==-1 ):
         print("syntax: \n "
               "python sorting_data.py <id>")
+        return
+    elif (len(sys.argv)>=2):
+        id=int(sys.argv[1])
     else:
-        print("start sorting")
-        sorting = sortData(id=int(sys.argv[1])) #.separate_data()
+        id=id
+           
+    print("start sorting")
+    sorting = sortData(id=id) #.separate_data()
 
 
 if __name__=="__main__":
