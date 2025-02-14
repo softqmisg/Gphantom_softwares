@@ -33,7 +33,7 @@ class DataBase():
                     break
                 except sqlError as err:
                         logging.error(f"error:{ err.msg}")  
-                        logging.warn("Retrying to connect to the database")
+                        logging.warning("Retrying to connect to the database")
         except KeyboardInterrupt:
             logging.critical("Exiting App")
         return

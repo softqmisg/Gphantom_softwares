@@ -61,11 +61,11 @@ template_query_write_save_statistics="UPDATE studies SET \
                                           WHERE id={id}"
 
 template_query_write_save_histfigpath="UPDATE studies SET \
-                                          histfigpath=\"{histpath}\"\
+                                          histfigpath=\"{histfigpath}\"\
                                           WHERE id={id}"
 
 template_query_write_save_matchfigpath="UPDATE studies SET \
-                                          matchfigpath=\"{matchpath}\"\
+                                          matchfigpath=\"{matchfigpath}\"\
                                           WHERE id={id}"
 
 template_query_write_save_matchpointpath="UPDATE studies SET \
@@ -342,7 +342,7 @@ class analysisData:
 
         return dist_x, dist_y, dist_z, dist_r, common1_mm, common2_mm
     #############################
-    def summarize_distortions(self,dist_x, dist_y, dist_z, dist_r, threshold_mm=5.0):
+    def summarize_distortions(self,dist_x, dist_y, dist_z, dist_r, threshold_mm=5.0,output_dir=None):
         """
         Generates summary statistics for distortions.
         """
@@ -380,11 +380,17 @@ class analysisData:
                 'percentage_above_threshold': float(np.sum(dist_r > threshold_mm) / len(dist_r) * 100)
             }
         }
+        # Save distortion summary
+        summary_path = os.path.join(output_dir, 'distortion_summary.json')
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=4)
+        logging.info(f"Saved distortion summary to {summary_path}")    
+
         # save distortion summary JSON
         self.mydatabase.write_query(
             template_query_write_save_statistics.format(
                 id=self.currentId_mri,
-                statistics=distortion_summary
+                statistics=summary
             )
         )        
         return summary
@@ -422,11 +428,17 @@ class analysisData:
         plt.xlabel('mm')
         plt.ylabel('Frequency')
 
-        plt.tight_layout()
         hist_path = os.path.join(output_dir, 'distortion_histograms.png')
+        plt.tight_layout()
         plt.savefig(hist_path)
         plt.close()
         logging.info(f"Saved distortion histograms to {hist_path}")
+        self.mydatabase.write_query(
+            template_query_write_save_histfigpath.format(
+                id=self.currentId_mri,
+                histfigpath=hist_path
+            )
+        )        
         return hist_path
     
     def visualize_matched_points(self,common_img1, common_img2, ct_image, mri_image, output_dir):
@@ -461,6 +473,12 @@ class analysisData:
         plt.savefig(scatter_path)
         plt.close()
         logging.info(f"Saved matched points scatter plot to {scatter_path}")
+        self.mydatabase.write_query(
+            template_query_write_save_matchfigpath.format(
+                id=self.currentId_mri,
+                matchfigpath=scatter_path
+            )
+        )        
         return scatter_path
     
     #############################
@@ -580,7 +598,7 @@ class analysisData:
             out_json = os.path.join(output_file, "distortions_per_slice.json")
             with open(out_json, 'w') as f:
                 json.dump(sorted_slice_distortions_list, f, indent=4)
-            logging.info(f"[INFO] Distortion per-slice stats saved to {out_json}")
+            logging.info(f"Distortion per-slice stats saved to {out_json}")
         self.mydatabase.write_query(template_query_write_save_distortions.format(id=self.currentId_mri,
                                                                                 distortions=sorted_slice_distortions_list
                                                                                 )
@@ -631,7 +649,7 @@ class analysisData:
             out_json = os.path.join(save_path, f'distortion_scatter_{component}.json')
             with open(out_json, 'w') as f:
                 json.dump(self.convert_ndarray_to_list(distortion_data), f, indent=4)
-            logging.info(f"[INFO] Distortion scatter data ({component}) saved to {out_json}")
+            logging.info(f" Distortion scatter data ({component}) saved to {out_json}")
         self.mydatabase.write_query(template_query_write_save_scatters[component].format(id=self.currentId_mri,
                                                                                         dist=self.convert_ndarray_to_list(distortion_data)
                                                                                         )
@@ -733,7 +751,7 @@ class analysisData:
                     map_dr[z, y, x] = arr_dr[i]
                     assigned_points += 1
 
-        logging.info(f"[INFO] Assigned {assigned_points} / {total_points} matched-distortion points to the voxel grid.")
+        logging.info(f"Assigned {assigned_points} / {total_points} matched-distortion points to the voxel grid.")
 
         # Optionally smooth
         if apply_gaussian_smoothing:
@@ -741,7 +759,7 @@ class analysisData:
             map_dy = gaussian_filter(map_dy, sigma=sigma, truncate=truncate)
             map_dz = gaussian_filter(map_dz, sigma=sigma, truncate=truncate)
             map_dr = gaussian_filter(map_dr, sigma=sigma, truncate=truncate)
-            logging.info(f"[INFO] Applied Gaussian smoothing (sigma={sigma}, truncate={truncate}).")
+            logging.info(f" Applied Gaussian smoothing (sigma={sigma}, truncate={truncate}).")
 
         # Prepare SITK images
         dx_sitk = sitk.GetImageFromArray(map_dx)
@@ -815,7 +833,7 @@ class analysisData:
         out_json = os.path.join(output_dir, "grid_position.json")
         with open(out_json, 'w') as json_file:
             json.dump(series_metadata, json_file, indent=4, cls=NumpyEncoder)
-        logging.info(f"[INFO] Saved grid positions to {out_json}")
+        logging.info(f"Saved grid positions to {out_json}")
         self.mydatabase.write_query(template_query_write_save_gridpositions.format(id=self.currentId_mri,
                                                                                     grids=series_metadata
                                                                                     )
@@ -828,7 +846,7 @@ class analysisData:
         out_json = os.path.join(output_dir, "distortions_per_slice.json")
         with open(out_json, 'w') as f:
             json.dump(self.convert_ndarray_to_list(sorted_slice_distortions), f, indent=4)
-        logging.info(f"[INFO] Distortions per slice saved to {out_json}")
+        logging.info(f" Distortions per slice saved to {out_json}")
 
     ##################################################################################
     '''
@@ -895,28 +913,14 @@ class analysisData:
             spacing1=ct_spacing,
             spacing2=mri_spacing
         )        
-        self.summarize_distortions(dist_x, dist_y, dist_z, dist_r, threshold_mm=threshold_mm)
-        logging.info(f"Saved distortion summary to statistics  in DB")
+        self.summarize_distortions(dist_x, dist_y, dist_z, dist_r, threshold_mm=threshold_mm,output_dir=self.analyze_Directory)
 
         # 7) Generate and save visualizations
         logging.info("7. Generate and save visualizations...")
-        histfigpath=self.plot_distortions(dist_x, dist_y, dist_z, dist_r, self.analyze_Directory)
-        # save distortion summary JSON
-        self.mydatabase.write_query(
-            template_query_write_save_histfigpath.format(
-                id=self.currentId_mri,
-                histfigpath=histfigpath
-            )
-        )
+        self.plot_distortions(dist_x, dist_y, dist_z, dist_r, self.analyze_Directory)
         
-        matchfigpath=self.visualize_matched_points(ct_matched_vox, mri_matched_vox, ct_image, mri_image, self.analyze_Directory)
-        # save distortion summary JSON
-        self.mydatabase.write_query(
-            template_query_write_save_matchfigpath.format(
-                id=self.currentId_mri,
-                matchfigpath=matchfigpath
-            )
-        )
+        self.visualize_matched_points(ct_matched_vox, mri_matched_vox, ct_image, mri_image, self.analyze_Directory)
+
         
         # 8) Save matched points and distortions
 
@@ -987,7 +991,7 @@ class analysisData:
             threshold_mm=threshold_mm
         )
         # Log some stats
-        logging.info("[INFO] Overall distortion stats (mutual nearest):")
+        logging.info(" Overall distortion stats (mutual nearest):")
         logging.info(f"  dx: mean={dist_x_mutual.mean():.3f}, std={dist_x_mutual.std():.3f} (mm)")
         logging.info(f"  dy: mean={dist_y_mutual.mean():.3f}, std={dist_y_mutual.std():.3f} (mm)")
         logging.info(f"  dz: mean={dist_z_mutual.mean():.3f}, std={dist_z_mutual.std():.3f} (mm)")
@@ -1113,7 +1117,7 @@ class registerImages:
     Find Name of files and call rgisteration the analysis
 '''       
 def main(id=-1):
-    logging.basicConfig(level=logging.NOTSET,format='%(asctime)s:%(levelname)s: %(message)s')
+    logging.basicConfig(level=logging.INFO,format='%(asctime)s:%(levelname)s: %(message)s')
     id_ct=0
     id_mri=0
     if(len(sys.argv)<2 and id==-1):
@@ -1180,6 +1184,7 @@ def main(id=-1):
                                 )        
     mydatabase.close()        
     ##################################################################################
+    return
 
 if __name__=="__main__":
     main(93)
