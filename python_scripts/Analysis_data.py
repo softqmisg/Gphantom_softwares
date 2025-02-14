@@ -6,13 +6,13 @@ import pydicom
 import json 
 import datetime
 from pathlib import Path
-
+import logging
 
 import nibabel as nib
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.constants import point
-from skimage import filters, measure, morphology
+from skimage import filters, measure, morphology,feature
 from scipy.spatial import KDTree
 from scipy.ndimage import sobel, correlate, gaussian_filter
 import json
@@ -34,26 +34,63 @@ template_query_write_save_status="UPDATE studies SET \
                                           status=\"{status}\"\
                                           WHERE id={id}"
 
-template_query_write_save_scatter="UPDATE studies SET \
-                                          scatter=\"{scatter}\"\
+template_query_write_save_scatters={'dist_x':"UPDATE studies SET \
+                                          dist_x=\"{dist}\"\
+                                          WHERE id={id}",
+                                    'dist_y':"UPDATE studies SET \
+                                          dist_y=\"{dist}\"\
+                                          WHERE id={id}",
+                                    'dist_z':"UPDATE studies SET \
+                                          dist_y=\"{dist}\"\
+                                          WHERE id={id}",                                          
+                                    'dist_total':"UPDATE studies SET \
+                                          dist_total=\"{dist}\"\
+                                          WHERE id={id}",                                          
+                                    }
+#previously curve
+template_query_write_save_distortions="UPDATE studies SET \
+                                          distortions=\"{distortions}\"\
                                           WHERE id={id}"
 
-template_query_write_save_curve="UPDATE studies SET \
-                                          curve=\"{curve}\"\
+template_query_write_save_gridpositions="UPDATE studies SET \
+                                          grids=\"{grids}\"\
                                           WHERE id={id}"
 
-CT_reference=""
-# BaseAddress="/home/mehdi/Documents/Gphantom2/python_scripts/dicoms"
+template_query_write_save_statistics="UPDATE studies SET \
+                                          stats=\"{statistics}\"\
+                                          WHERE id={id}"
+
+template_query_write_save_histfigpath="UPDATE studies SET \
+                                          histfigpath=\"{histpath}\"\
+                                          WHERE id={id}"
+
+template_query_write_save_matchfigpath="UPDATE studies SET \
+                                          matchfigpath=\"{matchpath}\"\
+                                          WHERE id={id}"
+
+template_query_write_save_matchpointpath="UPDATE studies SET \
+                                          matchpointpath=\"{matchpointpath}\"\
+                                          WHERE id={id}"
+
+template_query_write_save_map3Ddistpath="UPDATE studies SET \
+                                          map3Ddistpath=\"{map3Ddistpath}\"\
+                                          WHERE id={id}"
+
+CT_reference="E:/PostDoc/__Works/Dr.Fatemi/G_phantom/Software/dicoms/CT_reference/13_125.nii.gz"
+#CT_reference="/var/www/html/backend2/public/13_125.nii.gz"
+
 BaseAddress="E:/PostDoc/__Works/Dr.Fatemi/G_phantom/Software/dicoms"
+# BaseAddress="/home/mehdi/Documents/Gphantom2/python_scripts/dicoms"
 
 db_host="127.0.0.1"
 db_port=3306
-db_name="phantom_db_v2"
-db_user="root"
-db_password=""
+db_name="phantom_db_v2" #"phantom"
+db_user="root" #"debian-sys-maint"
+db_password="" #"Vmz8JKxbWusTLhio"
 
-
+##################################################################################
 class NumpyEncoder(json.JSONEncoder):
+    """Helper for saving NumPy arrays in JSON."""
     def default(self, obj):
         if isinstance(obj, np.ndarray):
             return obj.tolist()  # Convert NumPy array to list
@@ -65,23 +102,30 @@ class NumpyEncoder(json.JSONEncoder):
             return bool(obj)  # Convert NumPy boolean to Python bool
         else:
             return super(NumpyEncoder, self).default(obj)
-
+##################################################################################
 '''
     Class of analysis CT/MRI. Find geometry distortion and its statistics
 '''        
 class analysisData:
-    def __init__(self,mydatabase,currentId_mri,ct_nifti_path=None,mri_nifti_path=None):
+    def __init__(self,mydatabase,currentId_mri,mri_analyze_Directory,ct_nifti_path=None,mri_nifti_path=None):
         self.mydatabase=mydatabase
         self.currentId_mri=currentId_mri
-        self.start_analysis(ct_nifti_path,mri_nifti_path)
+        self.analyze_Directory=mri_analyze_Directory
+        self.start_analysis(ct_nifti_path,mri_nifti_path,
+                            ct_intensity_range=(0, 100),
+                            mri_intensity_range=(200, 1000),
+                            tolerance_mm=5.0,
+                            threshold_mm=5.0
+                            )
      ##################################################################################
     '''
         Image Tools function
     '''
-    ##################################################################################
+     ##########################
     def convert_ndarray_to_list(self,data):
         """
-        Recursively convert numpy arrays to lists in a nested dictionary or list.
+         Recursively convert numpy arrays to lists in a nested dictionary or list.
+         Useful for JSON serialization.
         """
         if isinstance(data, dict):
             return {key: self.convert_ndarray_to_list(value) for key, value in data.items()}
@@ -91,58 +135,122 @@ class analysisData:
             return data.tolist()
         else:
             return data
-    ##################################################################################
+    #############################
     # Function to load NIfTI images and extract the 3D volume
+    #  Image I/O and Loading   #
+    ############################# 
     def load_nifti_image(self,file_path):
+        """
+        Loads a NIfTI image using SimpleITK and returns:
+        - image (NumPy array, shape: [z, y, x])
+        - pixel_spacing (tuple of floats: (x_spacing, y_spacing, z_spacing))
+        - isocenter (world coordinates of the physical center of the image)
+        - sitk_image (the original SimpleITK Image object)
+        """
         nifti_data = sitk.ReadImage(file_path)
         image = sitk.GetArrayFromImage(nifti_data)
-        pixel_spacing = nifti_data.GetSpacing()  # Extract 3D pixel spacing (in mm)
-
-        # Get image dimensions (z, y, x) order for the numpy array
-        image_dimensions = image.shape
-
-        # Get the origin of the image (world coordinates of voxel (0,0,0))
-        origin = np.array(nifti_data.GetOrigin())
-
+        spacing = nifti_data.GetSpacing()  # Extract 3D pixel spacing (in mm)
+        origin = np.array(nifti_data.GetOrigin()) # Get the origin of the image (world coordinates of voxel (0,0,0))
+        direction = np.array(nifti_data.GetDirection()).reshape(3, 3)
+        image_dimensions = image.shape # Get image dimensions (z, y, x) order for the numpy array
+        # Compute the physical center (isocenter) in world coordinates
         # Calculate the center of the image in voxel coordinates (x, y, z order)
-        image_center_voxel = np.array(image_dimensions[::-1]) / 2.0
-
+        center_voxel = np.array([dim // 2 for dim in image_dimensions])
+        #image_center_voxel = np.array(image_dimensions[::-1]) / 2.0
         # Calculate the physical isocenter (world coordinates)
-        isocenter = origin + image_center_voxel * np.array(pixel_spacing)
+        #isocenter = origin + image_center_voxel * np.array(pixel_spacing)
+        physical_center = origin + direction.dot(center_voxel * spacing)
 
-
-        return image, pixel_spacing, isocenter
-    ##################################################################################
+        return image, spacing, physical_center, nifti_data
+    #############################
+    #      Preprocessing        #
+    #############################
     # Clip intensity of the CT and MRI images separately
     def clip_intensity(self,image, intensity_range):
+        """
+        Clamps (clips) the intensities of 'image' to [min_val, max_val].
+        """        
         min_val, max_val = intensity_range
         clipped_image = np.clip(image, min_val, max_val)
         return clipped_image 
-    ##################################################################################
+    #################################
     # Remove regions outside the squared phantom
     def remove_outside_regions(self,image):
+        """
+        Uses Otsu thresholding + largest connected component to identify phantom region.
+        Returns:
+        - masked_image
+        - mask (boolean)
+        - coordinates of the largest connected component
+        """
         # Otsu thresholding to create binary mask
         thresh = filters.threshold_otsu(image)
         binary_image = image > thresh
+        # Remove small objects
+        binary_image = morphology.remove_small_objects(binary_image, min_size=500)
 
         # Label connected components and remove small objects
         labeled_image = measure.label(binary_image)
         regions = measure.regionprops(labeled_image)
 
+        if not regions:
+            logging.error("No regions found after thresholding and removing small objects.")
+            return image, np.ones_like(image, dtype=bool), [], [], []
+
         # Find the largest region, assuming it's the phantom
         largest_region = max(regions, key=lambda r: r.area)
+
         # Create a mask for the largest region
         mask = np.zeros_like(image, dtype=bool)
-        mask[largest_region.coords[:, 0], largest_region.coords[:, 1], largest_region.coords[:, 2]] = True
-        dim_x, dim_y, dist_z = largest_region.coords[:, 0], largest_region.coords[:, 1], largest_region.coords[:, 2]
-        # Apply mask to the image
-        phantom_image = image * mask
-        return phantom_image, mask, dim_x, dim_y, dist_z
+        coords = largest_region.coords  # shape: (N, 3) with (z, y, x) indexing
+        mask[coords[:, 0], coords[:, 1], coords[:, 2]] = True
+        idx_x, idx_y, idx_z = np.where(mask)
+        idx_x, idx_y, idx_z = np.unique(idx_x), np.unique(idx_y), np.unique(idx_z)
+        mask[idx_x[0]:idx_x[-1], idx_y[0]:idx_y[-1], idx_z[0]:idx_z[-1]] = 1
+        # Apply mask
+        masked_image = image * mask
+        dim_z, dim_y, dim_x = coords[:, 0], coords[:, 1], coords[:, 2]
+        return masked_image, mask, dim_z, dim_y, dim_x
     ################################################################################## 
     '''
         Analysis tools
     '''
-    ##################################################################################    
+    #############################
+    #   Grid Cross Detection    #
+    #############################    
+    def detect_plus_like_cross_sections(self,image_3d, image_type='CT'):
+        """
+        Detects "+"-like cross-sections in a 3D image.
+        Uses image_type to adjust parameters accordingly.
+        Returns an array of centroid coordinates in (z, y, x).
+        """
+        logging.info(f"Detecting grid intersections for {image_type} image...")
+
+        # Smoothing parameters can be adjusted based on image type
+        if image_type == 'CT':
+            # blurred = gaussian_filter(image_3d, sigma=2)
+            # Enhance grid lines: assuming grid lines are darker
+            enhanced = filters.sobel(image_3d)
+        else:  # MRI
+            # blurred = gaussian_filter(image_3d, sigma=1)
+            # Enhance grid lines: assuming grid lines are brighter
+            enhanced = filters.scharr(image_3d)
+
+        # Detect peaks which might correspond to grid intersections
+        coordinates = feature.peak_local_max(
+            enhanced,
+            min_distance=5,  # Minimum number of pixels separating peaks
+            threshold_abs=np.percentile(enhanced, 99),
+            exclude_border=True
+        )
+
+        logging.info(f"Detected {len(coordinates)} potential grid intersections in {image_type} image.")
+
+        # Optionally, refine detections using additional criteria
+        # For example, validate local cross-like structures around each peak
+
+        return coordinates  # in (z, y, x)
+    ###############################
     def detect_plus_like_cross_sections_3D_MRI(self,image_3d):
         # image_3d = gaussian_filter(image_3d, sigma=3)
 
@@ -173,7 +281,7 @@ class analysisData:
         # Get the coordinates of the centers of the "+" like cross-sections
         centers = np.array([prop.centroid for prop in intersection_props])
         return centers
-    ##################################################################################
+    ###############################
     def detect_plus_like_cross_sections_3D_CT(self,image_3d):
         # image_3d = gaussian_filter(image_3d, sigma=7)
         # Create a 3D "+"-like kernel (cross shape)
@@ -206,397 +314,736 @@ class analysisData:
         centers = np.array([prop.centroid for prop in intersection_props])
         return centers
     ##################################################################################
-    def generate_distortion_plot_from_isocenter(self,sorted_slice_distortions, isocenter, component='total_dist',
-                                                save_path=None):
-        """
-        Generates a distortion plot for the specified component relative to the distance from the isocenter
-        and saves the data in a dictionary.
-
-        :param sorted_slice_distortions: Dictionary of distortions with statistical summaries.
-        :param isocenter: Tuple representing the coordinates of the isocenter (x, y, z) in mm.
-        :param component: The distortion component to plot ('dist_x', 'dist_y', 'dist_z', 'total_dist').
-        :param save_path: File path to save the plot image.
-
-        :return: Dictionary with 'distance_from_isocenter' and 'distortion' values.
-        """
-        # Initialize lists to store distances and distortions
-        distances_from_isocenter = []
-        distortions = []
-
-        # Unpack isocenter coordinates
-        isocenter_x, isocenter_y, isocenter_z = isocenter
-
-        # Iterate through each slice and gather data
-        for slice_index, values in sorted_slice_distortions.items():
-            # Iterate through each distortion point in the current slice
-            for ct_point, distortion in zip(values['ct_points'], values[component]):
-                # Calculate the distance from the specified isocenter
-                distance_from_isocenter = np.sqrt(
-                    (ct_point[0] - isocenter_x) ** 2 +
-                    (ct_point[1] - isocenter_y) ** 2 +
-                    (ct_point[2] - isocenter_z) ** 2
-                )
-
-                # Append the calculated distance and the distortion to the lists
-                distances_from_isocenter.append(distance_from_isocenter)
-                distortions.append(distortion)
-
-        # Create the dictionary to save the data
-        distortion_data = {
-            'distance_from_isocenter': distances_from_isocenter,
-            'distortion': distortions
-        }
-
-        # Convert data to a JSON-serializable format
-        distortion_data_list = self.convert_ndarray_to_list(distortion_data)
-        if save_path:
-        # Save the data dictionary to a JSON file
-            with open(os.path.join(save_path, 'distortion_scatter.json'), 'w') as json_file:
-                json.dump(distortion_data_list, json_file, indent=4)
-            # print(f"Distortion data saved to distortion_data.json")
-        self.mydatabase.write_query(template_query_write_save_scatter.format(id=self.currentId_mri,
-                                                                                    scatter=distortion_data_list
-                                                                                    )
-                                    )
-
-        # Return the data dictionary
-        return distortion_data
-    ##################################################################################
-    def save_scatter(self,centers, target_path):
-        centers = np.array(centers)
-        z_coords = centers[:, 2]
-        y_coords = centers[:, 1]
-        x_coords = centers[:, 0]
-        series_metadata = {
-            "z_coords": z_coords,
-            "y_coords": y_coords,
-            "x_coords": x_coords,
-        }
-        # data_serializable = {k: convert_numpy_to_native(v) if isinstance(v, (np.ndarray, np.generic)) else v for k, v in
-        #                      series_metadata.items()}
-        #
-        with open(os.path.join(target_path, "grid_position.json"), 'w') as json_file:
-            json.dump(series_metadata, json_file, indent=4, cls=NumpyEncoder)
-    ##################################################################################
     '''
         Analysis
     '''  
-    ##################################################################################    
-    def compute_common_distances(self,points_img1, points_img2, tolerance=1e-5, verbose=False):
+    #############################
+    #     Matching Points       #
+    #############################
+    def compute_common_distances(points_img1, points_img2, spacing1, spacing2, tolerance_mm=5.0, verbose=False):
         """
-        Compute the Euclidean distance between common 3D points in two sets of points.
-
-        Parameters:
-        points_img1, points_img2: numpy arrays of shape (N, 3) representing 3D points.
-        tolerance: a small value or a tuple/list of three values to handle matching tolerance.
-        verbose: if True, print detailed information about the matching process.
-
+        Compute 1-to-1 matches between two sets of 3D points using spatial tolerance.
+        Spacing is used to convert voxel distances to physical distances.
         Returns:
-        distances: a list of distances between the common points.
-        common_points_img1, common_points_img2: the matched 3D points from both sets.
+        - common_points_img1
+        - common_points_img2
         """
-        # Ensure inputs are 2D arrays
-        points_img1 = np.atleast_2d(points_img1)
-        points_img2 = np.atleast_2d(points_img2)
+        # Convert voxel coordinates to physical space
+        points1_mm = points_img1 * spacing1[::-1]  # (z, y, x) * (z, y, x)
+        points2_mm = points_img2 * spacing2[::-1]
 
+        tree2 = cKDTree(points2_mm)
+        matches = tree2.query_ball_point(points1_mm, r=tolerance_mm)
 
+        common1, common2 = [], []
+        used_indices_img2 = set()
 
-        # Check if both arrays have the correct number of columns (3 for 3D points)
-        if points_img1.shape[1] != 3 or points_img2.shape[1] != 3:
-            raise ValueError("Each point set must have a shape (N, 3) for 3D points.")
-
-        if points_img1.size == 0 or points_img2.size == 0:
-            raise ValueError("One or both of the point sets are empty.")
-
-        # Ensure tolerance is a tuple of length 3 or a single float
-        if isinstance(tolerance, (float, int)):
-            tolerance = (tolerance, tolerance, tolerance)
-        elif len(tolerance) != 3:
-            raise ValueError("Tolerance must be a single float or a tuple of three values.")
+        for i, neighbors in enumerate(matches):
+            if neighbors:
+                # Find the closest neighbor not already used
+                distances = np.linalg.norm(points2_mm[neighbors] - points1_mm[i], axis=1)
+                sorted_indices = np.argsort(distances)
+                for idx in sorted_indices:
+                    neighbor = neighbors[idx]
+                    if neighbor not in used_indices_img2:
+                        common1.append(points_img1[i])
+                        common2.append(points_img2[neighbor])
+                        used_indices_img2.add(neighbor)
+                        break  # Move to next point in img1
 
         if verbose:
-            print(f"Matching with tolerance: {tolerance}")
+            logging.info(f"Found {len(common1)} matched points.")
 
-        # Use a KD-tree for efficient nearest-neighbor search
-        tree = cKDTree(points_img2)
-
-        # Match points from img1 to img2
-        common_points_img1 = []
-        common_points_img2 = []
-
-        for i, point1 in enumerate(points_img1):
-            distances, indexes = tree.query(point1, k=1, distance_upper_bound=max(tolerance))
-            if distances <= max(tolerance):
-                common_points_img1.append(point1)
-                common_points_img2.append(points_img2[indexes])
-
-        if len(common_points_img1) == 0:
-            raise ValueError("No common points found within the given tolerance.")
-
-        # Convert to numpy arrays for further computation
-        common_points_img1 = np.array(common_points_img1)
-        common_points_img2 = np.array(common_points_img2)
-
-        if verbose:
-            print(f"Matched {len(common_points_img1)} points.")
-
-        return common_points_img1, common_points_img2
-    ##################################################################################
-    def compute_slice_distortions(self,ct_centers,
-                                mri_centers,
-                                ct_pixel_spacing,
-                                mri_pixel_spacing,
-                                threshold=None,
-                                output_file=None,
-                                percentage_threshold=1.0):
+        return np.array(common1), np.array(common2)
+    #############################
+    #   Distortion Computation  #
+    #############################
+    def compute_distortions(common_img1, common_img2, spacing1, spacing2):
         """
-        Computes distortions between corresponding points in CT and MRI scans in x, y, and z axes.
-        Keeps distortions within their corresponding image slice for 3D visualization.
-
-        :param ct_centers: Array of CT centers (in pixel coordinates).
-        :param mri_centers: Array of MRI centers (in pixel coordinates).
-        :param ct_pixel_spacing: Pixel spacing for CT (x, y, z).
-        :param mri_pixel_spacing: Pixel spacing for MRI (x, y, z).
-        :param threshold: Maximum allowed distance (in mm) to consider points as corresponding. If None, no threshold is applied.
-
-        :return: Dictionary of distortions with keys as slice indices and values as lists of distortions in x, y, z, and total distance.
+        Computes distortions between matched points.
+        Returns arrays of distortions in x, y, z, and total distance.
         """
-        # Convert CT and MRI pixel coordinates to mm by multiplying with pixel spacing
-        set1 = ct_centers * np.array(ct_pixel_spacing)
-        set2 = mri_centers * np.array(mri_pixel_spacing)
+        # Convert voxel to physical coordinates
+        common1_mm = common_img1 * spacing1[::-1]
+        common2_mm = common_img2 * spacing2[::-1]
 
-        # Build KDTree for both point sets
-        tree1 = KDTree(set1, leafsize=3)
-        tree2 = KDTree(set2, leafsize=3)
+        distortions = common2_mm - common1_mm  # (dz, dy, dx)
+        dist_x = distortions[:, 2]
+        dist_y = distortions[:, 1]
+        dist_z = distortions[:, 0]
+        dist_r = np.linalg.norm(distortions, axis=1)
 
-        # Find nearest neighbors from set1 to set2
-        distances_set1_to_set2, indices_set1_to_set2 = tree1.query(set2)
+        return dist_x, dist_y, dist_z, dist_r, common1_mm, common2_mm
 
-        # Find nearest neighbors from set2 to set1
-        distances_set2_to_set1, indices_set2_to_set1 = tree2.query(set1)
+    def summarize_distortions(dist_x, dist_y, dist_z, dist_r, threshold_mm=5.0):
+        """
+        Generates summary statistics for distortions.
+        """
+        summary = {
+            'dist_x': {
+                'mean': float(np.mean(dist_x)),
+                'median': float(np.median(dist_x)),
+                'std': float(np.std(dist_x)),
+                'max': float(np.max(dist_x)),
+                'min': float(np.min(dist_x)),
+                'percentage_above_threshold': float(np.sum(np.abs(dist_x) > threshold_mm) / len(dist_x) * 100)
+            },
+            'dist_y': {
+                'mean': float(np.mean(dist_y)),
+                'median': float(np.median(dist_y)),
+                'std': float(np.std(dist_y)),
+                'max': float(np.max(dist_y)),
+                'min': float(np.min(dist_y)),
+                'percentage_above_threshold': float(np.sum(np.abs(dist_y) > threshold_mm) / len(dist_y) * 100)
+            },
+            'dist_z': {
+                'mean': float(np.mean(dist_z)),
+                'median': float(np.median(dist_z)),
+                'std': float(np.std(dist_z)),
+                'max': float(np.max(dist_z)),
+                'min': float(np.min(dist_z)),
+                'percentage_above_threshold': float(np.sum(np.abs(dist_z) > threshold_mm) / len(dist_z) * 100)
+            },
+            'dist_r': {
+                'mean': float(np.mean(dist_r)),
+                'median': float(np.median(dist_r)),
+                'std': float(np.std(dist_r)),
+                'max': float(np.max(dist_r)),
+                'min': float(np.min(dist_r)),
+                'percentage_above_threshold': float(np.sum(dist_r > threshold_mm) / len(dist_r) * 100)
+            }
+        }
+        # save distortion summary JSON
+        self.mydatabase.write_query(
+            template_query_write_save_statistics.format(
+                id=self.currentId_mri,
+                statistics=distortion_summary
+            )
+        )        
+        return summary
 
-        # Dictionary to hold distortions for each slice
+    #############################
+    #   Visualization Functions #
+    #############################
+
+    def plot_distortions(self,dist_x, dist_y, dist_z, dist_r, output_dir):
+        """
+        Plots histograms of distortions and saves the figures.
+        """
+        plt.figure(figsize=(12, 8))
+        plt.subplot(2, 2, 1)
+        plt.hist(dist_x, bins=50, color='r', alpha=0.7)
+        plt.title('Distortion X')
+        plt.xlabel('mm')
+        plt.ylabel('Frequency')
+
+        plt.subplot(2, 2, 2)
+        plt.hist(dist_y, bins=50, color='g', alpha=0.7)
+        plt.title('Distortion Y')
+        plt.xlabel('mm')
+        plt.ylabel('Frequency')
+
+        plt.subplot(2, 2, 3)
+        plt.hist(dist_z, bins=50, color='b', alpha=0.7)
+        plt.title('Distortion Z')
+        plt.xlabel('mm')
+        plt.ylabel('Frequency')
+
+        plt.subplot(2, 2, 4)
+        plt.hist(dist_r, bins=50, color='k', alpha=0.7)
+        plt.title('Total Distortion')
+        plt.xlabel('mm')
+        plt.ylabel('Frequency')
+
+        plt.tight_layout()
+        hist_path = os.path.join(output_dir, 'distortion_histograms.png')
+        plt.savefig(hist_path)
+        plt.close()
+        logging.info(f"Saved distortion histograms to {hist_path}")
+        return hist_path
+    
+    def visualize_matched_points(self,common_img1, common_img2, ct_image, mri_image, output_dir):
+        """
+        Creates a 3D scatter plot of matched points overlayed on CT and MRI images.
+        """
+        from mpl_toolkits.mplot3d import Axes3D
+
+        fig = plt.figure(figsize=(15, 7))
+
+        # CT image plot
+        ax1 = fig.add_subplot(121, projection='3d')
+        ax1.scatter(common_img1[:, 2], common_img1[:, 1], common_img1[:, 0],
+                    c='r', marker='o', label='CT Points')
+        ax1.set_title('CT Matched Points')
+        ax1.set_xlabel('X')
+        ax1.set_ylabel('Y')
+        ax1.set_zlabel('Z')
+
+        # MRI image plot
+        ax2 = fig.add_subplot(122, projection='3d')
+        ax2.scatter(common_img2[:, 2], common_img2[:, 1], common_img2[:, 0],
+                    c='b', marker='^', label='MRI Points')
+        ax2.set_title('MRI Matched Points')
+        ax2.set_xlabel('X')
+        ax2.set_ylabel('Y')
+        ax2.set_zlabel('Z')
+
+        plt.legend()
+        plt.tight_layout()
+        scatter_path = os.path.join(output_dir, 'matched_points_scatter.png')
+        plt.savefig(scatter_path)
+        plt.close()
+        logging.info(f"Saved matched points scatter plot to {scatter_path}")
+        return scatter_path
+    
+    #############################
+    #   Slice-Based Distortion  #
+    #############################    
+    def compute_slice_distortions(self,common_img1, common_img2, spacing1, spacing2,
+                                threshold_mm=None, output_file=None, percentage_threshold=1.0):
+        """
+        Computes distortions (dx, dy, dz, total) between corresponding points in CT and MRI.
+        Both 'common_img1' and 'common_img2' are in voxel coordinates (z,y,x).
+        We use the pixel_spacing for distances.
+        Returns a dict of slice distortions:
+        slice_index -> {
+            'dist_x': [...],
+            'dist_y': [...],
+            'dist_z': [...],
+            'total_dist': [...],
+            'ct_points': [...],
+            'mri_points': [...],
+            'ct_points_mm': [...],
+            'mri_points_mm': [...],
+            'summary': {...}
+        }
+        """
+        # Convert voxel coords to mm
+        ct_xyz_mm = common_img1 * spacing1[::-1]  # (z, y, x) * (z, y, x)
+        mri_xyz_mm = common_img2 * spacing2[::-1]
+
+        # Calculate distortions
+        distortions = mri_xyz_mm - ct_xyz_mm  # [dz, dy, dx]
+        dist_x = distortions[:, 2]
+        dist_y = distortions[:, 1]
+        dist_z = distortions[:, 0]
+        dist_r = np.linalg.norm(distortions, axis=1)
+
+        # Assign distortions to slices based on CT z-coordinate
         slice_distortions = {}
+        for i in range(len(dist_x)):
+            if threshold_mm and dist_r[i] > threshold_mm:
+                continue  # Skip distortions exceeding the threshold
 
-        # Iterate through set1 and set2 points to keep only mutual nearest neighbors
-        for i, (dist1, idx1) in enumerate(zip(distances_set1_to_set2, indices_set1_to_set2)):
-            # Ensure the match is mutual
-            if indices_set2_to_set1[idx1] == i:
-                # Get the corresponding points
-                point_set1 = set1[idx1]
-                point_set2 = set2[i]
+            slice_idx = int(round(common_img1[i, 0]))  # z voxel index from CT
 
-                # Calculate the distances along x, y, z axes
-                dist_x = abs(point_set1[0] - point_set2[0])
-                dist_y = abs(point_set1[1] - point_set2[1])
-                dist_z = abs(point_set1[2] - point_set2[2])
+            if slice_idx not in slice_distortions:
+                slice_distortions[slice_idx] = {
+                    'dist_x': [],
+                    'dist_y': [],
+                    'dist_z': [],
+                    'total_dist': [],
+                    'ct_points': [],
+                    'mri_points': [],
+                    'ct_points_mm': [],
+                    'mri_points_mm': []
+                }
 
-                # Calculate the total Euclidean distance
-                total_dist = np.sqrt(dist_x ** 2 + dist_y ** 2 + dist_z ** 2)
+            slice_distortions[slice_idx]['dist_x'].append(float(dist_x[i]))
+            slice_distortions[slice_idx]['dist_y'].append(float(dist_y[i]))
+            slice_distortions[slice_idx]['dist_z'].append(float(dist_z[i]))
+            slice_distortions[slice_idx]['total_dist'].append(float(dist_r[i]))
+            slice_distortions[slice_idx]['ct_points'].append(common_img1[i].tolist())
+            slice_distortions[slice_idx]['mri_points'].append(common_img2[i].tolist())
+            slice_distortions[slice_idx]['ct_points_mm'].append(ct_xyz_mm[i].tolist())
+            slice_distortions[slice_idx]['mri_points_mm'].append(mri_xyz_mm[i].tolist())
 
-                # Apply the distance threshold if needed
-                if threshold is None or total_dist <= threshold:
-                    # Determine the slice index (e.g., use z-coordinate to determine the slice index)
-                    slice_index = int(round(point_set1[2] / ct_pixel_spacing[2]))  # Assuming z is the slice index
+        # Compute summary statistics per slice
+        for slice_idx, values in slice_distortions.items():
+            arr_dx = np.array(values['dist_x'])
+            arr_dy = np.array(values['dist_y'])
+            arr_dz = np.array(values['dist_z'])
+            arr_dr = np.array(values['total_dist'])
 
-                    # Initialize the slice index if not present
-                    if slice_index not in slice_distortions:
-                        slice_distortions[slice_index] = {
-                            'dist_x': [],
-                            'dist_y': [],
-                            'dist_z': [],
-                            'total_dist': [],
-                            'ct_points_mm': [],  # Store CT points in mm
-                            'ct_points': [],  # Store CT points
-                            'mri_points': [],  # Store MRI points
-                            'mri_points_mm': []  # Store MRI points in mm
-                        }
-
-                    # Store distortions and corresponding points in the slice dictionary
-                    slice_distortions[slice_index]['dist_x'].append(dist_x)
-                    slice_distortions[slice_index]['dist_y'].append(dist_y)
-                    slice_distortions[slice_index]['dist_z'].append(dist_z)
-                    slice_distortions[slice_index]['total_dist'].append(total_dist)
-
-                    slice_distortions[slice_index]['ct_points'].append(np.round(point_set1 / ct_pixel_spacing).astype(int))
-                    slice_distortions[slice_index]['ct_points_mm'].append(point_set1)
-
-                    slice_distortions[slice_index]['mri_points'].append(np.round(point_set2 / ct_pixel_spacing).astype(int))
-                    slice_distortions[slice_index]['mri_points_mm'].append(point_set2)
-
-        # Sort slice_distortions dictionary by slice index
-        sorted_slice_distortions = dict(sorted(slice_distortions.items()))
-
-        # Calculate mean, median, max, min, and percentage above threshold for each item in each slice
-        for slice_index, values in sorted_slice_distortions.items():
-            # Calculate summary statistics
             summary = {
                 'dist_x': {
-                    'mean': np.mean(values['dist_x']),
-                    'median': np.median(values['dist_x']),
-                    'max': np.max(values['dist_x']),
-                    'min': np.min(values['dist_x']),
-                    'percentage_above_threshold': (np.sum(np.array(values['dist_x']) > percentage_threshold) / len(
-                        values['dist_x'])) * 100
+                    'mean': float(np.mean(arr_dx)),
+                    'median': float(np.median(arr_dx)),
+                    'max': float(np.max(arr_dx)),
+                    'min': float(np.min(arr_dx)),
+                    'percentage_above_threshold': float(
+                        np.sum(np.abs(arr_dx) > percentage_threshold) / len(arr_dx) * 100
+                    )
                 },
                 'dist_y': {
-                    'mean': np.mean(values['dist_y']),
-                    'median': np.median(values['dist_y']),
-                    'max': np.max(values['dist_y']),
-                    'min': np.min(values['dist_y']),
-                    'percentage_above_threshold': (np.sum(np.array(values['dist_y']) > percentage_threshold) / len(
-                        values['dist_y'])) * 100
+                    'mean': float(np.mean(arr_dy)),
+                    'median': float(np.median(arr_dy)),
+                    'max': float(np.max(arr_dy)),
+                    'min': float(np.min(arr_dy)),
+                    'percentage_above_threshold': float(
+                        np.sum(np.abs(arr_dy) > percentage_threshold) / len(arr_dy) * 100
+                    )
                 },
                 'dist_z': {
-                    'mean': np.mean(values['dist_z']),
-                    'median': np.median(values['dist_z']),
-                    'max': np.max(values['dist_z']),
-                    'min': np.min(values['dist_z']),
-                    'percentage_above_threshold': (np.sum(np.array(values['dist_z']) > percentage_threshold) / len(
-                        values['dist_z'])) * 100
+                    'mean': float(np.mean(arr_dz)),
+                    'median': float(np.median(arr_dz)),
+                    'max': float(np.max(arr_dz)),
+                    'min': float(np.min(arr_dz)),
+                    'percentage_above_threshold': float(
+                        np.sum(np.abs(arr_dz) > percentage_threshold) / len(arr_dz) * 100
+                    )
                 },
-                'total_dist': {
-                    'mean': np.mean(values['total_dist']),
-                    'median': np.median(values['total_dist']),
-                    'max': np.max(values['total_dist']),
-                    'min': np.min(values['total_dist']),
-                    'percentage_above_threshold': (np.sum(np.array(values['total_dist']) > percentage_threshold) / len(
-                        values['total_dist'])) * 100
+                'dist_r': {
+                    'mean': float(np.mean(arr_dr)),
+                    'median': float(np.median(arr_dr)),
+                    'max': float(np.max(arr_dr)),
+                    'min': float(np.min(arr_dr)),
+                    'percentage_above_threshold': float(np.sum(arr_dr > percentage_threshold) / len(arr_dr) * 100)
                 }
             }
-            # Update summary in the dictionary
-            sorted_slice_distortions[slice_index]['summary'] = summary
-            # Convert numpy arrays to lists before saving to JSON
+            slice_distortions[slice_idx]['summary'] = summary
+
+        # Convert for JSON
+        sorted_slice_distortions = dict(sorted(slice_distortions.items(), key=lambda x: x[0]))
         sorted_slice_distortions_list = self.convert_ndarray_to_list(sorted_slice_distortions)
 
-        # Save the sorted dictionary to a file if output_file is provided
+        # Optionally save
         if output_file:
-            with open(os.path.join(output_file, "select_description3.json"), 'w') as json_file:
-                json.dump(sorted_slice_distortions_list, json_file, indent=4)
-            print(f"Sorted distortions saved to {output_file}")
-        
-        self.mydatabase.write_query(template_query_write_save_curve.format(id=self.currentId_mri,
-                                                                                    curve=sorted_slice_distortions_list
-                                                                                    )
+            out_json = os.path.join(output_file, "distortions_per_slice.json")
+            with open(out_json, 'w') as f:
+                json.dump(sorted_slice_distortions_list, f, indent=4)
+            logging.info(f"[INFO] Distortion per-slice stats saved to {out_json}")
+        self.mydatabase.write_query(template_query_write_save_distortions.format(id=self.currentId_mri,
+                                                                                distortions=sorted_slice_distortions_list
+                                                                                )
                                     )
+        return sorted_slice_distortions    
+    #############################
+    def generate_distortion_plot_from_isocenter(self,common_img1_mm, distortions, isocenter, component='total_dist', save_path=None):
+        """
+        Creates a scatter plot of 'component' vs. distance-from-isocenter, saves data to JSON.
+        'isocenter' is expected in mm: (x, y, z).
+        'common_img1_mm' are the CT matched points in mm.
+        'distortions' are the corresponding distortion values.
+        """
+        isocenter_x, isocenter_y, isocenter_z = isocenter
+        distances_from_iso = []
+        distortions_component = []
 
-        return sorted_slice_distortions
+        for i in range(len(common_img1_mm)):
+            pt_mm = common_img1_mm[i]
+            dx, dy, dz = distortions[i]
+            if component == 'dist_x':
+                comp = dx
+            elif component == 'dist_y':
+                comp = dy
+            elif component == 'dist_z':
+                comp = dz
+            else:
+                # 'dist_total'
+                comp = np.sqrt(dx**2 + dy**2 + dz**2)
+
+            # distance from iso
+            r = np.sqrt(
+                (pt_mm[0] - isocenter_x)**2 +
+                (pt_mm[1] - isocenter_y)**2 +
+                (pt_mm[2] - isocenter_z)**2
+            )
+            distances_from_iso.append(float(r))
+            distortions_component.append(float(comp))
+
+        # Prepare dictionary
+        distortion_data = {
+            'distance_from_isocenter': distances_from_iso,
+            'distortion': distortions_component
+        }
+
+        # Save to JSON
+        if save_path is not None:
+            out_json = os.path.join(save_path, f'distortion_scatter_{component}.json')
+            with open(out_json, 'w') as f:
+                json.dump(self.convert_ndarray_to_list(distortion_data), f, indent=4)
+            logging.info(f"[INFO] Distortion scatter data ({component}) saved to {out_json}")
+        self.mydatabase.write_query(template_query_write_save_scatters[component].format(id=self.currentId_mri,
+                                                                                        dist=self.convert_ndarray_to_list(distortion_data)
+                                                                                        )
+                                    )  
+        # Return the data dictionary
+        return distortion_data
+    #############################
+    def compute_mutual_nearest_distances(self,ct_points_vox, mri_points_vox, ct_pixel_spacing, mri_pixel_spacing, threshold_mm=None):
+        """
+        (Optional) Another approach to compute dx, dy, dz, and total distances for matched points.
+        Returns arrays: dist_x, dist_y, dist_z, total_distances.
+        """
+        ct_xyz_mm = ct_points_vox * ct_pixel_spacing[::-1]
+        mri_xyz_mm = mri_points_vox * mri_pixel_spacing[::-1]
+
+        tree_ct = cKDTree(ct_xyz_mm)
+        tree_mri = cKDTree(mri_xyz_mm)
+
+        dist_ct_to_mri, idx_ct_to_mri = tree_ct.query(mri_xyz_mm)
+        dist_mri_to_ct, idx_mri_to_ct = tree_mri.query(ct_xyz_mm)
+
+        matched_dx = []
+        matched_dy = []
+        matched_dz = []
+        matched_dr = []
+
+        for i_mri, (d1, i_ct) in enumerate(zip(dist_ct_to_mri, idx_ct_to_mri)):
+            if idx_mri_to_ct[i_ct] == i_mri:
+                pt_ct = ct_xyz_mm[i_ct]
+                pt_mri = mri_xyz_mm[i_mri]
+                dx = pt_mri[0] - pt_ct[0]
+                dy = pt_mri[1] - pt_ct[1]
+                dz = pt_mri[2] - pt_ct[2]
+                dr = np.sqrt(dx**2 + dy**2 + dz**2)
+                if (threshold_mm is None) or (dr <= threshold_mm):
+                    matched_dx.append(dx)
+                    matched_dy.append(dy)
+                    matched_dz.append(dz)
+                    matched_dr.append(dr)
+
+        return (np.array(matched_dx),
+                np.array(matched_dy),
+                np.array(matched_dz),
+                np.array(matched_dr))
+
     ##################################################################################
-    def compute_mutual_nearest_distances(self,ct_centers, mri_centers, ct_pixel_spacing, mri_pixel_spacing,
-                                        threshold=None):
+    
+    '''
+        JSON Saving Functions
+    '''  
+    #############################
+    #   Creating Dist. Maps     #
+    #############################
+    def save_distortion_scatter_json(self,common_img1_mm, distortions, isocenter, output_dir):
         """
-        Computes distances between corresponding points in CT and MRI scans. If points are too far apart (above a threshold), they are ignored.
-
-        :param ct_centers: Array of CT centers (in pixel coordinates).
-        :param mri_centers: Array of MRI centers (in pixel coordinates).
-        :param ct_pixel_spacing: Pixel spacing for CT (x, y, z).
-        :param mri_pixel_spacing: Pixel spacing for MRI (x, y, z).
-        :param distance_threshold: Maximum allowed distance (in mm) to consider points as corresponding. If None, no threshold is applied.
-
-        :return: Arrays of distances in x, y, z directions, and total distances for corresponding points.
+        Saves distortion_scatter_{component}.json files similar to the original code.
         """
-        # Convert CT and MRI pixel coordinates to mm by multiplying with pixel spacing
-        set1 = ct_centers * np.array(ct_pixel_spacing)
-        set2 = mri_centers * np.array(mri_pixel_spacing)
-        # Build KDTree for both point sets
-        # Build KDTree for both point sets
-        tree1 = KDTree(set1, leafsize=3)
-        tree2 = KDTree(set2, leafsize=3)
+        components = ['dist_x', 'dist_y', 'dist_z', 'dist_total']
+        for component in components:
+            self.generate_distortion_plot_from_isocenter(common_img1_mm, distortions, isocenter,
+                                                    component=component, save_path=output_dir)
+          
+    #############################
+    def save_grid_position_json(self,common_img1_vox, output_dir):
+        """
+        Saves grid_position.json similar to the original code.
+        'common_img1_vox' is in (z,y,x) voxel coordinates.
+        """
+        centers = common_img1_vox
+        z_coords = centers[:, 0]
+        y_coords = centers[:, 1]
+        x_coords = centers[:, 2]
+        series_metadata = {
+            "z_coords": z_coords.tolist(),
+            "y_coords": y_coords.tolist(),
+            "x_coords": x_coords.tolist(),
+        }
+        out_json = os.path.join(output_dir, "grid_position.json")
+        with open(out_json, 'w') as json_file:
+            json.dump(series_metadata, json_file, indent=4, cls=NumpyEncoder)
+        logging.info(f"[INFO] Saved grid positions to {out_json}")
+        self.mydatabase.write_query(template_query_write_save_gridpositions.format(id=self.currentId_mri,
+                                                                                    grids=series_metadata
+                                                                                    )
+                                    )  
+    
+    ##############################
+    def create_and_save_all_distortion_maps(self,sorted_slice_distortions,
+                                            reference_sitk_image,
+                                            output_dir,
+                                            apply_gaussian_smoothing=True,
+                                            sigma=1.0,
+                                            truncate=1.0,
+                                            mask=None):
+        """
+        Create 4 separate 3D distortion maps: dx, dy, dz, dr (in mm),
+        for each voxel location. Each volume is saved as both .npy and .nii.gz.
 
-        # Find nearest neighbors from set1 to set2
-        distances_set1_to_set2, indices_set1_to_set2 = tree1.query(set2)
+        NOTE: We rely on 'ct_points' in (z,y,x) voxel coords, and
+            'dist_x', 'dist_y', 'dist_z', 'total_dist' from the dictionary.
+        """
+        mask = mask.astype(int)
+        # Grab reference shape (z, y, x) from reference_sitk_image
+        ref_array = sitk.GetArrayFromImage(reference_sitk_image)
+        shape_z, shape_y, shape_x = ref_array.shape
 
-        # Find nearest neighbors from set2 to set1
-        distances_set2_to_set1, indices_set2_to_set1 = tree2.query(set1)
+        # Prepare empty volumes
+        map_dx = np.zeros_like(ref_array, dtype=np.float64)
+        map_dy = np.zeros_like(ref_array, dtype=np.float64)
+        map_dz = np.zeros_like(ref_array, dtype=np.float64)
+        map_dr = np.zeros_like(ref_array, dtype=np.float64)
 
-        matched_distances_x = []
-        matched_distances_y = []
-        matched_distances_z = []
-        total_distances = []
-        matched_points_set1 = []
-        matched_points_set2 = []
+        total_points = 0
+        assigned_points = 0
 
-        # Iterate through set1 and set2 points to keep only mutual nearest neighbors
-        for i, (dist1, idx1) in enumerate(zip(distances_set1_to_set2, indices_set1_to_set2)):
-            # Ensure the match is mutual
-            if indices_set2_to_set1[idx1] == i:
-                # Get the corresponding points
-                point_set1 = set1[idx1]
-                point_set2 = set2[i]
+        # Fill in
+        for slice_idx, vals in sorted_slice_distortions.items():
+            pts_vox = vals['ct_points']     # each is [z_vox, y_vox, x_vox]
+            arr_dx = vals['dist_x']
+            arr_dy = vals['dist_y']
+            arr_dz = vals['dist_z']
+            arr_dr = vals['total_dist']
 
-                # Calculate the distances along x, y, z axes
-                dist_x = abs(point_set1[0] - point_set2[0])
-                dist_y = abs(point_set1[1] - point_set2[1])
-                dist_z = abs(point_set1[2] - point_set2[2])
+            for i, pt_vox in enumerate(pts_vox):
+                z, y, x = pt_vox
+                # cast to int
+                z, y, x = int(round(z)), int(round(y)), int(round(x))
+                total_points += 1
+                if (0 <= z < shape_z) and (0 <= y < shape_y) and (0 <= x < shape_x):
+                    map_dx[z, y, x] = arr_dx[i]
+                    map_dy[z, y, x] = arr_dy[i]
+                    map_dz[z, y, x] = arr_dz[i]
+                    map_dr[z, y, x] = arr_dr[i]
+                    assigned_points += 1
 
-                # Calculate the total Euclidean distance
-                total_dist = np.sqrt(dist_x ** 2 + dist_y ** 2 + dist_z ** 2)
+        logging.info(f"[INFO] Assigned {assigned_points} / {total_points} matched-distortion points to the voxel grid.")
 
-                # Apply the distance threshold if needed
-                if threshold is None or dist_x <= threshold:
-                    matched_distances_x.append(dist_x)
-                    matched_distances_y.append(dist_y)
-                    matched_distances_z.append(dist_z)
-                    total_distances.append(total_dist)
-                    matched_points_set1.append(point_set1)
-                    matched_points_set2.append(point_set2)
+        # Optionally smooth
+        if apply_gaussian_smoothing:
+            map_dx = gaussian_filter(map_dx, sigma=sigma, truncate=truncate)
+            map_dy = gaussian_filter(map_dy, sigma=sigma, truncate=truncate)
+            map_dz = gaussian_filter(map_dz, sigma=sigma, truncate=truncate)
+            map_dr = gaussian_filter(map_dr, sigma=sigma, truncate=truncate)
+            logging.info(f"[INFO] Applied Gaussian smoothing (sigma={sigma}, truncate={truncate}).")
 
-        return (np.array(matched_distances_x),
-                np.array(matched_distances_y),
-                np.array(matched_distances_z),
-                np.array(total_distances)
-                )
+        # Prepare SITK images
+        dx_sitk = sitk.GetImageFromArray(map_dx)
+        dy_sitk = sitk.GetImageFromArray(map_dy)
+        dz_sitk = sitk.GetImageFromArray(map_dz)
+        dr_sitk = sitk.GetImageFromArray(map_dr)
+        mask_sitk = sitk.GetImageFromArray(mask)
+
+        # Copy geometry
+        dx_sitk.CopyInformation(reference_sitk_image)
+        dy_sitk.CopyInformation(reference_sitk_image)
+        dz_sitk.CopyInformation(reference_sitk_image)
+        dr_sitk.CopyInformation(reference_sitk_image)
+        mask_sitk.CopyInformation(reference_sitk_image)
+
+        # Save all as NIfTI + NPY
+        def _save_nii_npy(array_data, sitk_img, out_prefix):
+            """Saves array_data to .npy and .nii.gz with given prefix."""
+            npy_path = os.path.join(output_dir, f"{out_prefix}.npy")
+            np.save(npy_path, array_data)
+            nii_path = os.path.join(output_dir, f"{out_prefix}.nii.gz")
+            sitk.WriteImage(sitk_img, nii_path)
+            logging.info(f"Saved {out_prefix}.npy and {out_prefix}.nii.gz")
+
+        _save_nii_npy(map_dx, dx_sitk, "distortion_dx")
+        _save_nii_npy(map_dy, dy_sitk, "distortion_dy")
+        _save_nii_npy(map_dz, dz_sitk, "distortion_dz")
+        _save_nii_npy(map_dr, dr_sitk, "distortion_dr")
+        _save_nii_npy(mask, mask_sitk, "mask")
+        Map3DdistPathJSON={
+            "distortion_dx":os.path.join(output_dir, "distortion_dx.nii.gz"),
+            "distortion_dy":os.path.join(output_dir, "distortion_dy.nii.gz"),
+            "distortion_dz":os.path.join(output_dir, "distortion_dz.nii.gz"),
+            "distortion_dr":os.path.join(output_dir, "distortion_dr.nii.gz"),
+            "mask":os.path.join(output_dir, "mask.nii.gz"),
+        }
+        self.mydatabase.write_query(
+            template_query_write_save_map3Ddistpath.format(
+                id=self.currentId_mri,
+                map3Ddistpath=Map3DdistPathJSON
+            )
+        )        
+    #############################
+    def save_distortions_per_slice_json(self,sorted_slice_distortions, output_dir):
+        """
+        Saves distortions_per_slice.json similar to the original code.
+        """
+        out_json = os.path.join(output_dir, "distortions_per_slice.json")
+        with open(out_json, 'w') as f:
+            json.dump(self.convert_ndarray_to_list(sorted_slice_distortions), f, indent=4)
+        logging.info(f"[INFO] Distortions per slice saved to {out_json}")
+    ##############################
+    # def save_scatter(self,centers, target_path):
+    #     centers = np.array(centers)
+    #     z_coords = centers[:, 2]
+    #     y_coords = centers[:, 1]
+    #     x_coords = centers[:, 0]
+    #     series_metadata = {
+    #         "z_coords": z_coords,
+    #         "y_coords": y_coords,
+    #         "x_coords": x_coords,
+    #     }
+    #     # data_serializable = {k: convert_numpy_to_native(v) if isinstance(v, (np.ndarray, np.generic)) else v for k, v in
+    #     #                      series_metadata.items()}
+    #     #
+    #     with open(os.path.join(target_path, "grid_position.json"), 'w') as json_file:
+    #         json.dump(series_metadata, json_file, indent=4, cls=NumpyEncoder)
+
     ##################################################################################
     '''
     Start Analysis
     '''
     ##################################################################################    
-    def start_analysis(self,ct_file_path,mri_file_path):
-        # Load CT and MRI NIfTI images (full 3D volumes)
+    def start_analysis(self,ct_file_path,mri_file_path,
+         ct_intensity_range=(0, 100),
+         mri_intensity_range=(200, 1000),
+         tolerance_mm=2.0,
+         threshold_mm=2.0):
+
+        # 1) Load CT and MRI NIfTI images (full 3D volumes)
+        logging.info("1. Loading CT and MRI images...")
         try:
             if(ct_file_path!=""):
-                ct_image, ct_pixel_spacing, origin_ct = self.load_nifti_image(ct_file_path)
+                ct_image, ct_spacing, ct_isocenter, ct_sitk = self.load_nifti_image(ct_file_path)
         except Exception as e:
-            print(f"Unexpected error  in loading CT:'{ct_file_path}': {e}")
+            logging.error(f"Unexpected error  in loading CT:'{ct_file_path}': {e}")
         try:
-            mri_image, mri_pixel_spacing, origin_mr = self.load_nifti_image(mri_file_path)
+            mri_image, mri_spacing, mri_isocenter, mri_sitk = self.load_nifti_image(mri_file_path)
+
         except Exception as e:
-            print(f"Unexpected error  in loading MRI:'{mri_file_path}': {e}")            
-        # Clip intensity of CT and MRI separately
-        clipped_ct = self.clip_intensity(ct_image, (0, 100))  # Clip CT between 0 and 100
-        clipped_mri = self.clip_intensity(mri_image, (0, 1000))  # Clip MRI between 0 and 1000
-        # Remove regions outside the squared phantom
-        mri_phantom, mask, dim_x, dim_y, dim_z = self.remove_outside_regions(clipped_mri)
+            logging.error(f"Unexpected error  in loading MRI:'{mri_file_path}': {e}")            
+
+        # 2) Clip intensity of CT and MRI separately
+        logging.info("2. Clipping intensities...")
+        clipped_ct = self.clip_intensity(ct_image, ct_intensity_range)  # Clip CT between 0 and 100
+        clipped_mri = self.clip_intensity(mri_image, mri_intensity_range)  # Clip MRI between 0 and 1000
+
+        # 3) Mask out outside region from MRI and apply same mask to CT
+        logging.info("Removing outside regions...")
+        mri_phantom, mask, _, _, _ = self.remove_outside_regions(clipped_mri)
         ct_phantom = clipped_ct * mask
-        print(f"{mask.shape = }")
-        # Detect cross sections in CT and MRI (in 3D)
-        ct_intersections = self.detect_plus_like_cross_sections_3D_MRI(ct_phantom)
-        mri_intersections = self.detect_plus_like_cross_sections_3D_MRI(mri_phantom)
-        print(f"{ct_intersections.shape = }")
-        print(f"{mri_intersections.shape = }")
-        # Compute common points
-        print("Computing the grids' center ...")
-        common_points_img1, common_points_img2 = self.compute_common_distances(ct_intersections,
-                                                                        mri_intersections,
-                                                                        tolerance=(2, 2, 2),
-                                                                        verbose=True)
-        # self.save_scatter(ct_intersections, target_path=None)
 
-        print('Computer the slice distortion ...')
-        distortions_per_slice = self.compute_slice_distortions(common_points_img1,
-                                                        common_points_img2,
-                                                        ct_pixel_spacing,
-                                                        mri_pixel_spacing,
-                                                        threshold=None,
-                                                        output_file=None)
-        self.generate_distortion_plot_from_isocenter(distortions_per_slice, isocenter=origin_ct, save_path = None)
-        print('Save distortion stats at JSON file ...')
-        dist_x, dist_y, dist_z, total_distances = self.compute_mutual_nearest_distances(common_points_img1,
-                                                                                common_points_img2,
-                                                                                ct_pixel_spacing,
-                                                                                mri_pixel_spacing,
-                                                                                threshold=None)
+        # 4) Detect cross-sections
+        ct_intersections_vox = self.detect_plus_like_cross_sections(ct_phantom, image_type='CT')
+        mri_intersections_vox = self.detect_plus_like_cross_sections(mri_phantom, image_type='MRI')
+        logging.info(f"CT intersections detected: {ct_intersections_vox.shape[0]}")
+        logging.info(f"MRI intersections detected: {mri_intersections_vox.shape[0]}")
 
+        # 5) Match points (in voxel space) with a certain tolerance
+        logging.info("Matching grid intersection points between CT and MRI...")
+        ct_matched_vox, mri_matched_vox = self.compute_common_distances(
+            ct_intersections_vox,
+            mri_intersections_vox,
+            spacing1=ct_spacing,
+            spacing2=mri_spacing,
+            tolerance_mm=tolerance_mm,
+            verbose=True
+        )
+        if len(ct_matched_vox) == 0:
+            logging.error("No matched points found. Exiting.")
+            return
+
+        # 6) Compute distortions
+        logging.info("Computing distortions between matched points...")
+        dist_x, dist_y, dist_z, dist_r, ct_matched_mm, mri_matched_mm = self.compute_distortions(
+            ct_matched_vox,
+            mri_matched_vox,
+            spacing1=ct_spacing,
+            spacing2=mri_spacing
+        )        
+        self.summarize_distortions(dist_x, dist_y, dist_z, dist_r, threshold_mm=threshold_mm)
+        logging.info(f"Saved distortion summary to statistics  in DB")
+
+        # 7) Generate and save visualizations
+        histfigpath=self.plot_distortions(dist_x, dist_y, dist_z, dist_r, self.analyze_Directory)
+        # save distortion summary JSON
+        self.mydatabase.write_query(
+            template_query_write_save_histfigpath.format(
+                id=self.currentId_mri,
+                histfigpath=histfigpath
+            )
+        )
+        
+        matchfigpath=self.visualize_matched_points(ct_matched_vox, mri_matched_vox, ct_image, mri_image, self.analyze_Directory)
+        # save distortion summary JSON
+        self.mydatabase.write_query(
+            template_query_write_save_matchfigpath.format(
+                id=self.currentId_mri,
+                matchfigpath=matchfigpath
+            )
+        )
+        
+        # 8) Save matched points and distortions
+        matched_points = {
+            'CT_matched_points_mm': ct_matched_mm.tolist(),
+            'MRI_matched_points_mm': mri_matched_mm.tolist(),
+            'dist_x_mm': dist_x.tolist(),
+            'dist_y_mm': dist_y.tolist(),
+            'dist_z_mm': dist_z.tolist(),
+            'dist_r_mm': dist_r.tolist()
+        }
+        matched_points_path = os.path.join(self.analyze_Directory, 'matched_points.json')
+        with open(matched_points_path, 'w') as f:
+            json.dump(matched_points, f, indent=4, cls=NumpyEncoder)
+        self.mydatabase.write_query(
+            template_query_write_save_matchpointpath.format(
+                id=self.currentId_mri,
+                matchpointpath=matched_points_path
+            )
+        )
+        logging.info(f"Saved matched points and distortions to {matched_points_path}")
+
+        # 9) Compute and save slice-based distortions
+        logging.info("Computing slice-based distortions...")
+
+        sorted_slice_distortions=self.compute_slice_distortions(
+            common_img1=ct_matched_vox,
+            common_img2=mri_matched_vox,
+            spacing1=ct_spacing,
+            spacing2=mri_spacing,
+            threshold_mm=threshold_mm,
+            output_file=self.analyze_Directory,
+            percentage_threshold= 1.0,
+            )
+        # 10) Generate and save distortion scatter JSON files
+        logging.info("Generating distortion scatter JSON files...")
+        distortions = np.stack((dist_x, dist_y, dist_z), axis=1)
+        self.save_distortion_scatter_json(
+            common_img1_mm=ct_matched_mm,
+            distortions=distortions,
+            isocenter=ct_isocenter,
+            output_dir=self.analyze_Directory
+            )
+        # 11) Save grid positions
+        logging.info("Saving grid positions...")
+        self.save_grid_position_json(
+            common_img1_vox=ct_matched_vox,
+            output_dir=self.analyze_Directory
+        )
+        # 12) Create and save distortion maps
+        logging.info("Creating 3D distortion maps (dx, dy, dz, dr)...")
+        self.create_and_save_all_distortion_maps(
+            sorted_slice_distortions=sorted_slice_distortions,
+            reference_sitk_image=ct_sitk,
+            output_dir=self.analyze_Directory,
+            apply_gaussian_smoothing=True,
+            sigma=1.0,
+            truncate=1.0,
+            mask=mask,
+        )
+        # 13) (Optional) Compute mutual nearest distances and log stats
+        dist_x_mutual, dist_y_mutual, dist_z_mutual, dist_r_mutual = self.compute_mutual_nearest_distances(
+            ct_matched_vox,
+            mri_matched_vox,
+            ct_spacing,
+            mri_spacing,
+            threshold_mm=threshold_mm
+        )
+        # Log some stats
+        logging.info("[INFO] Overall distortion stats (mutual nearest):")
+        logging.info(f"  dx: mean={dist_x_mutual.mean():.3f}, std={dist_x_mutual.std():.3f} (mm)")
+        logging.info(f"  dy: mean={dist_y_mutual.mean():.3f}, std={dist_y_mutual.std():.3f} (mm)")
+        logging.info(f"  dz: mean={dist_z_mutual.mean():.3f}, std={dist_z_mutual.std():.3f} (mm)")
+        logging.info(f"  dr: mean={dist_r_mutual.mean():.3f}, std={dist_r_mutual.std():.3f} (mm)")
+
+        # # 14) Save the intersection points found in CT (for reference)
+        # logging.info("Saving grid positions (voxel coordinates)...")
+        # self.save_grid_position_json(
+        #     common_img1_vox=ct_matched_vox,
+        #     output_dir=self.analyze_Directory
+        # )
+
+        logging.info("Processing complete.")
+
+
+##############################################################################################################
 '''
     Class of registeration CT/MRI. MRI registered to CT
 '''
@@ -615,6 +1062,7 @@ class registerImages:
     def read_image(self,file_path):
         """Read the volumetric image file."""
         return sitk.ReadImage(file_path)
+
     ##################################################################################
     def check_image_compatibility(self,fixed_image, moving_image):
         """Ensure the images have the same dimension and type."""
@@ -671,7 +1119,6 @@ class registerImages:
 
         return final_transform
 
-
     ##################################################################################
     def resample_image(self,moving_image, transform, reference_image):
         """Resample the moving image using the final transformation."""
@@ -702,17 +1149,16 @@ class registerImages:
 
         # Save the registered image
         sitk.WriteImage(registered_moving_image, registered_mri_nifti_path)
-
-
+##############################################################################################################
 '''
     Find Name of files and call rgisteration the analysis
 '''       
 def main():
-    print(len(sys.argv))
+    logging.basicConfig(level=logging.NOTSET,format='%(asctime)s:%(levelname)s: %(message)s')
     id_ct=0
     id_mri=0
     if(len(sys.argv)<2):
-        print("Error: Syntax")
+        logging.error("Syntax")
         return 
     elif (len(sys.argv)==2):
         id_mri=sys.argv[1]
@@ -724,8 +1170,8 @@ def main():
     mydatabase=DataBase(host=db_host,port=db_port,database=db_name,user=db_user,password=db_password)
     currentId_ct=id_ct
     currentId_mri=id_mri
-    print('current ct Id:',currentId_ct)
-    print('current mri Id:',currentId_mri)
+    logging.info('current ct Id:',currentId_ct)
+    logging.info('current mri Id:',currentId_mri)
     if (currentId_ct != 0):
         readid_ct=mydatabase.read_query(template_query_read_directory.format(id=currentId_ct))
         ct_Directory=readid_ct[0]['directory']
@@ -737,7 +1183,7 @@ def main():
     else:
         ct_nifti_file=CT_reference
     ct_nifti_file=f'{ct_nifti_file}'.replace('\\','\\\\')
-    print(">>>>>>CT File:",ct_nifti_file)  
+    logging.info(">>>>>>CT File:",ct_nifti_file)  
 
     readid_mri=mydatabase.read_query(template_query_read_directory.format(id=currentId_mri))
     mri_Directory=readid_mri[0]['directory']
@@ -746,7 +1192,9 @@ def main():
     mri_nifti_files=[f for f in os.listdir(mri_nifti_Directory) if (f.endswith('.nii.gz')and (not f.startswith('registeredImage_')))]
     mri_nifti_file=os.path.join(mri_nifti_Directory,mri_nifti_files[0])
     mri_nifti_file=f'{mri_nifti_file}'.replace('\\','\\\\')
-    print(">>>>>>MRI File:",mri_nifti_file)  
+    logging.info(">>>>>>MRI File:",mri_nifti_file)  
+    mri_analyze_Directory=os.path.join(Path(mri_Directory),'analyze')
+    os.makedirs(mri_analyze_Directory,exist_ok=True)
     ##############################################################################
     ### Write start of analysis in DB
     mydatabase.write_query(template_query_write_save_status.format(id=currentId_mri,
@@ -758,11 +1206,11 @@ def main():
     registered_mri_nifti_file=os.path.join(mri_nifti_Directory,'registeredImage_'+mri_nifti_files[0])
     registered_mri_nifti_file=f'{registered_mri_nifti_file}'.replace('\\','\\\\')
     registerImages(ct_nifti_path=ct_nifti_file,mri_nifti_path=mri_nifti_file,registered_mri_nifti_path=registered_mri_nifti_file)
-    print("Registeration was done!!!!")
+    logging.info("Registeration was done!!!!")
     ##############################################################################
     ###  Analysis
-    analysisData(mydatabase,currentId_mri,ct_nifti_path=ct_nifti_file,mri_nifti_path=registered_mri_nifti_file)
-    print("Analysis was done!!!!")
+    analysisData(mydatabase,currentId_mri,mri_analyze_Directory,ct_nifti_path=ct_nifti_file,mri_nifti_path=registered_mri_nifti_file)
+    logging.info("Analysis was done!!!!")
     ##############################################################################
     ### Write end of analysis in DB
     mydatabase.write_query(template_query_write_save_status.format(id=currentId_mri,
