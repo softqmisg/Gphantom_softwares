@@ -8,6 +8,7 @@ from collections import defaultdict
 from dicom2nifti.exceptions import ConversionValidationError
 import json 
 import datetime
+import logging
 
 #dicom2nifti               2.4.11
 #pydicom                   2.4.4
@@ -32,11 +33,29 @@ db_port=3306
 db_name="phantom_db_v2"
 db_user="root"
 db_password=""
+##################################################################################
+
+"""
+    Custom JSON Encoder
+"""
+class DICOMEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, pydicom.multival.MultiValue):
+            return list(obj)  # Convert MultiValue to list
+        elif isinstance(obj, pydicom.valuerep.PersonName):
+            return str(obj)  # Convert PersonName to string
+        elif isinstance(obj, pydicom.valuerep.DSfloat):
+            return float(obj)  # Convert DSfloat to float
+        elif isinstance(obj, pydicom.valuerep.IS):
+            return int(obj)  # Convert IS to int
+        # Add more custom handling as needed
+        return super().default(obj)
+##################################################################################
+    
 
 class sortData:
-    def __init__(self,id, dir_out="outs",move:bool=True):
+    def __init__(self,id, out_path="outs",move:bool=True):
         """
-
         :param dir_src: directory of the dicom files
         :param dir_out: directory to save the separated dicom files
         :param move: to remove or keep the source file (default: False --> to keep the source images)
@@ -45,16 +64,16 @@ class sortData:
         self.mydatabase=DataBase(host=db_host,port=db_port,database=db_name,user=db_user,password=db_password)
         self.currentId=id
         readid=self.mydatabase.read_query(template_query_read_directory.format(id=self.currentId))
-        print(readid[0]['directory'])
+        logging.info(f"Directory in database: {readid[0]['directory']}")
         Directory=readid[0]['directory']
-        self.dir_src=os.path.join(BaseAddress,Directory)
-        self.dir_out = os.path.join(self.dir_src,dir_out)
+        dir_src=os.path.join(BaseAddress,Directory)
+        dir_out = os.path.join(dir_src,out_path)
         self.currentUserId=readid[0]['userId']
-        print("input:",self.dir_src)
-        print("output:",self.dir_out)
+        logging.info(f"input: {dir_src}")
+        logging.info(f"output: {dir_out}")
         self.move = move
 
-        self.separate_data()
+        self.separate_data(dir_src,dir_out)
 
 
 
@@ -100,7 +119,7 @@ class sortData:
             series_dir = os.path.join(base_output_dir, series_uid, "dicom")
             if not os.path.exists(series_dir):
                 os.makedirs(series_dir)
-                print('generate folder:',series_dir)
+                logging.info(f'generate folder:{series_dir}')
 
             # Move each file to the corresponding series directory
             if move:
@@ -169,7 +188,7 @@ class sortData:
                 # Skip localizers based on SeriesDescription or ImageType
                 if 'LOCALIZER' in series_description.upper() or \
                         (hasattr(ds, 'ImageType') and 'LOCALIZER' in ds.ImageType):
-                    print(f"Skipping localizer series: {series_description}")
+                    logging.warning(f"Skipping localizer series: {series_description}")
                     continue
 
                 if series_uid not in series_dict:
@@ -191,7 +210,7 @@ class sortData:
 
             # Check if series has sufficient slices
             if len(series_files) < min_slices:
-                print(f"Skipping series '{series_description}' due to insufficient slices ({len(series_files)}).")
+                logging.warning(f"Skipping series '{series_description}' due to insufficient slices ({len(series_files)}).")
                 continue
 
             # Create output subdirectory for this series
@@ -218,21 +237,22 @@ class sortData:
 
             try:
                 # Convert DICOM directory to NIfTI
-                print("Out Nifti:",series_Niftioutput_dir)
+                logging.info(f"Out Nifti: {series_Niftioutput_dir}")
                 dicom2nifti.convert_directory(series_output_dir, series_Niftioutput_dir, compression=True, reorient=True)
                 # dicom2nifti.dicom_series_to_nifti(series_output_dir, os.path.join(series_Niftioutput_dir, f"{series_description}.nii"), reorient_nifti=True)
             # except dicom2nifti.exceptions.ConversionValidationError as e:
             #     print(f"Could not convert series '{series_description}': {e}")
             #     return
+                logging.info("Done dicom to nifti")
             except Exception as e:
-                print(f"Unexpected error converting series '{series_description}': {e}")
+                logging.error(f"Unexpected error converting series '{series_description}': {e}")
                 return
 
             """
                 update studies Table with directory and metafile
 
             """
-            metafile=self.extract_dicom_metadata(temp_file_path)
+            metadata=self.extract_dicom_metadata(temp_file_path)
             str_dir=f'{series_output_dir}'.replace('\\','\\\\')
 
             # self.mydatabase.write_query(template_query_write_save_info_directory.format(userId=self.currentUserId,
@@ -242,24 +262,23 @@ class sortData:
             #                                                                             ))
             self.mydatabase.write_queryparam(template_query_write_save_info_directory,
                                         (self.currentUserId,
-                                        json.dumps(metafile),
+                                        json.dumps(metadata, cls=DICOMEncoder, indent=4),
                                         json.dumps(series_output_dir),
                                         datetime.datetime.now()
                                         )
                                         )            
-        print("===========================")
+        logging.info("===========================")
 
-    def separate_data(self):
+    def separate_data(self,dir_src,dir_out):
         """
-
         :param dir_src: Directory where dicom files are located.
         :param dir_out: Directory where separated dicom  files will be stored.
         :param move: Move it or copy: default is COPY.
         :return:
         """
         # Load DICOM files grouped by series
-        dicom_series = self.load_dicom_directory(self.dir_src)
-        self.dicom_to_nifti_by_series(self.dir_src, self.dir_out)
+        dicom_series = self.load_dicom_directory(dir_src)
+        self.dicom_to_nifti_by_series(dir_src, dir_out)
 
         # self.move_files_to_series_directories(dicom_series, self.dir_out, self.move)
         self.mydatabase.close()
@@ -267,10 +286,12 @@ class sortData:
 
 
 def main(id=-1):
+    logging.basicConfig(level=logging.INFO,format='%(asctime)s:%(filename)s:%(funcName)s:%(lineno)d:%(levelname)s: %(message)s')
+
     # print(pydicom.__version__)
     # sorting = sortData(id=1)
     if(len(sys.argv)<2 and id ==-1 ):
-        print("syntax: \n "
+        logging.warning("syntax: \n "
               "python sorting_data.py <id>")
         return
     elif (len(sys.argv)>=2):
@@ -278,10 +299,10 @@ def main(id=-1):
     else:
         id=id
            
-    print("start sorting")
+    logging.info("start sorting")
     sorting = sortData(id=id) #.separate_data()
 
 
 if __name__=="__main__":
-    main(40)
+    main(39)
     sys.exit()

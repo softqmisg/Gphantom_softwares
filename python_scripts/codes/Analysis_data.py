@@ -861,7 +861,7 @@ class analysisData:
             json.dump(series_metadata, json_file, indent=4, cls=NumpyEncoder)
         logging.info(f"Saved grid positions to {out_json}")
         self.mydatabase.write_queryparam(template_query_write_save_gridpositions,
-                                (json.dumps(series_metadata) ,self.currentId_mri)
+                                (json.dumps(series_metadata, indent=4, cls=NumpyEncoder) ,self.currentId_mri)
                                 )           
     ##############################
     def save_distortions_per_slice_json(self,sorted_slice_distortions, output_dir):
@@ -961,7 +961,7 @@ class analysisData:
             json.dump(matched_points, f, indent=4, cls=NumpyEncoder)
 
         self.mydatabase.write_queryparam(template_query_write_save_matchpointpath,
-                                (json.dumps(matched_points_path) ,self.currentId_mri)
+                                (json.dumps(matched_points_pathو, indent=4, cls=NumpyEncoder) ,self.currentId_mri)
                                 )            
         logging.info(f"8. Saved matched points and distortions to {matched_points_path}")
 

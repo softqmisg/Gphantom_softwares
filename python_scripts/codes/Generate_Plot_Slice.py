@@ -68,14 +68,14 @@ def load_and_interpolate_distortion(dist_name, slice_number, direction, M, disto
     if npy_path!="":
         distortion_map = np.load(npy_path)
         mask = np.load(npy_mask_path)
-        logging.info(f"Loaded distortion map from {npy_path}")
+        logging.info(f"Loaded distortion map(npy) from {npy_path}")
     elif os.path.exists(nii_path):
         sitk_image = sitk.ReadImage(nii_path)
         distortion_map = sitk.GetArrayFromImage(sitk_image)
 
         sitk_mask = sitk.ReadImage(nii_mask_path)
         mask = sitk.GetArrayFromImage(sitk_mask)
-        logging.info(f"Loaded distortion map from {nii_path}")
+        logging.info(f"Loaded distortion map(nii) from {nii_path}")
     else:
         logging.error(f"Distortion map '{dist_name}' not found in '{nii_path}'.")
         return None
