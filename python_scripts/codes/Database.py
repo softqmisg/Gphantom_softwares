@@ -76,4 +76,17 @@ class DataBase():
                 self.close()
                 self.connect(self.host,self.database,self.user,self.password,self.port)              
          
+    def write_queryparam(self,query,params,verbose=False):
+        while(True):
+            try:
+                if(verbose):
+                    logging.info(f'>>>Write query:{query}')
+                self.cursordb.execute(query,params) 
+                self.connection_object.commit()  #commit after writing             
+                break
+            except sqlError as err:
+                logging.error("failed run query! close database and try to reconnect database")
+                logging.error(f"error:{ err.msg}")
+                self.close()
+                self.connect(self.host,self.database,self.user,self.password,self.port)              
 

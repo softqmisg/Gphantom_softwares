@@ -18,7 +18,6 @@ from scipy.ndimage import sobel, correlate, gaussian_filter
 import json
 import SimpleITK as sitk
 from skimage.filters.rank import percentile
-import os
 
 from scipy.spatial import cKDTree
                 
@@ -29,52 +28,85 @@ from scipy.spatial import cKDTree
 from Database import DataBase
 
 
-template_query_read_directory="SELECT * FROM studies WHERE id={id}"
-template_query_write_save_status="UPDATE studies SET \
-                                          status=\"{status}\"\
-                                          WHERE id={id}"
+template_query_read_directory="SELECT directory FROM studies WHERE id={id}"
 
-template_query_write_save_scatters={'dist_x':"UPDATE studies SET \
-                                          dist_x=\"{dist}\"\
-                                          WHERE id={id}",
-                                    'dist_y':"UPDATE studies SET \
-                                          dist_y=\"{dist}\"\
-                                          WHERE id={id}",
-                                    'dist_z':"UPDATE studies SET \
-                                          dist_z=\"{dist}\"\
-                                          WHERE id={id}",                                          
-                                    'dist_total':"UPDATE studies SET \
-                                          dist_total=\"{dist}\"\
-                                          WHERE id={id}",                                          
+template_query_write_save_status="""
+                                    UPDATE studies SET 
+                                    status = %s
+                                    WHERE id = %s
+                                 """
+
+template_query_write_save_scatters={
+                                    "dist_x":
+                                        """
+                                          UPDATE studies SET 
+                                          dist_x = %s
+                                          WHERE id = %s
+                                        """,
+                                    "dist_y":
+                                        """
+                                          UPDATE studies SET 
+                                          dist_y = %s
+                                          WHERE id = %s
+                                        """,
+                                    "dist_z":
+                                        """
+                                          UPDATE studies SET 
+                                          dist_z = %s
+                                          WHERE id = %s
+                                        """,
+                                    "dist_total":
+                                        """
+                                          UPDATE studies SET 
+                                          dist_total = %s
+                                          WHERE id = %s
+                                        """,                                        
                                     }
 #previously curve
-template_query_write_save_distortions="UPDATE studies SET \
-                                          distortions=\"{distortions}\"\
-                                          WHERE id={id}"
+template_query_write_save_distortions=    """
+                                          UPDATE studies SET 
+                                          distortions = %s
+                                          WHERE id = %s
+                                          """
 
-template_query_write_save_gridpositions="UPDATE studies SET \
-                                          gridspos=\"{grids}\"\
-                                          WHERE id={id}"
 
-template_query_write_save_statistics="UPDATE studies SET \
-                                          stats=\"{statistics}\"\
-                                          WHERE id={id}"
+template_query_write_save_gridpositions="""
+                                          UPDATE studies SET 
+                                          gridspos = %s
+                                          WHERE id = %s
+                                          """
 
-template_query_write_save_histfigpath="UPDATE studies SET \
-                                          histfigpath=\"{histfigpath}\"\
-                                          WHERE id={id}"
 
-template_query_write_save_matchfigpath="UPDATE studies SET \
-                                          matchfigpath=\"{matchfigpath}\"\
-                                          WHERE id={id}"
+template_query_write_save_statistics="""
+                                          UPDATE studies SET 
+                                          stats = %s
+                                          WHERE id = %s
+                                          """
 
-template_query_write_save_matchpointpath="UPDATE studies SET \
-                                          matchpointpath=\"{matchpointpath}\"\
-                                          WHERE id={id}"
+template_query_write_save_histfigpath="""
+                                          UPDATE studies SET 
+                                          histfigpath = %s
+                                          WHERE id = %s
+                                          """
 
-template_query_write_save_map3Ddistpath="UPDATE studies SET \
-                                          map3Ddistpath=\"{map3Ddistpath}\"\
-                                          WHERE id={id}"
+template_query_write_save_matchfigpath="""
+                                          UPDATE studies SET 
+                                          matchfigpath = %s
+                                          WHERE id = %s
+                                          """
+
+
+template_query_write_save_matchpointpath="""
+                                          UPDATE studies SET 
+                                          matchpointpath = %s
+                                          WHERE id = %s
+                                          """
+
+template_query_write_save_map3Ddistpath = """
+                                            UPDATE studies SET
+                                            map3Ddistpath = %s
+                                            WHERE id = %s
+                                            """
 
 CT_reference="E:/PostDoc/__Works/Dr.Fatemi/G_phantom/Software/dicoms/CT_reference/13_125.nii.gz"
 #CT_reference="/var/www/html/backend2/public/13_125.nii.gz"
@@ -387,12 +419,11 @@ class analysisData:
         logging.info(f"Saved distortion summary to {summary_path}")    
 
         # save distortion summary JSON
-        self.mydatabase.write_query(
-            template_query_write_save_statistics.format(
-                id=self.currentId_mri,
-                statistics=summary
-            )
-        )        
+
+        self.mydatabase.write_queryparam(template_query_write_save_statistics,
+                                (json.dumps(summary) ,self.currentId_mri)
+                                )           
+
         return summary
 
     #############################
@@ -433,12 +464,9 @@ class analysisData:
         plt.savefig(hist_path)
         plt.close()
         logging.info(f"Saved distortion histograms to {hist_path}")
-        self.mydatabase.write_query(
-            template_query_write_save_histfigpath.format(
-                id=self.currentId_mri,
-                histfigpath=hist_path
-            )
-        )        
+        self.mydatabase.write_queryparam(template_query_write_save_histfigpath,
+                                (json.dumps(hist_path) ,self.currentId_mri)
+                                )                 
         return hist_path
     
     def visualize_matched_points(self,common_img1, common_img2, ct_image, mri_image, output_dir):
@@ -473,12 +501,9 @@ class analysisData:
         plt.savefig(scatter_path)
         plt.close()
         logging.info(f"Saved matched points scatter plot to {scatter_path}")
-        self.mydatabase.write_query(
-            template_query_write_save_matchfigpath.format(
-                id=self.currentId_mri,
-                matchfigpath=scatter_path
-            )
-        )        
+        self.mydatabase.write_queryparam(template_query_write_save_matchfigpath,
+                                (json.dumps(scatter_path) ,self.currentId_mri)
+                                )                   
         return scatter_path
     
     #############################
@@ -599,10 +624,9 @@ class analysisData:
             with open(out_json, 'w') as f:
                 json.dump(sorted_slice_distortions_list, f, indent=4)
             logging.info(f"Distortion per-slice stats saved to {out_json}")
-        self.mydatabase.write_query(template_query_write_save_distortions.format(id=self.currentId_mri,
-                                                                                distortions=sorted_slice_distortions_list
-                                                                                )
-                                    )
+        self.mydatabase.write_queryparam(template_query_write_save_distortions,
+                                (json.dumps(sorted_slice_distortions_list) ,self.currentId_mri)
+                                )        
         return sorted_slice_distortions    
     #############################
     def generate_distortion_plot_from_isocenter(self,common_img1_mm, distortions, isocenter, component='total_dist', save_path=None):
@@ -650,10 +674,11 @@ class analysisData:
             with open(out_json, 'w') as f:
                 json.dump(self.convert_ndarray_to_list(distortion_data), f, indent=4)
             logging.info(f" Distortion scatter data ({component}) saved to {out_json}")
-        self.mydatabase.write_query(template_query_write_save_scatters[component].format(id=self.currentId_mri,
-                                                                                        dist=self.convert_ndarray_to_list(distortion_data)
-                                                                                        )
-                                    )  
+
+        self.mydatabase.write_queryparam(template_query_write_save_scatters[component],
+                                (json.dumps(self.convert_ndarray_to_list(distortion_data)) ,self.currentId_mri)
+                                )
+
         # Return the data dictionary
         return distortion_data
     #############################
@@ -779,7 +804,7 @@ class analysisData:
         def _save_nii_npy(array_data, sitk_img, out_prefix):
             """Saves array_data to .npy and .nii.gz with given prefix."""
             npy_path = os.path.join(output_dir, f"{out_prefix}.npy")
-            np.save(npy_path, array_data)
+            # np.save(npy_path, array_data)
             nii_path = os.path.join(output_dir, f"{out_prefix}.nii.gz")
             sitk.WriteImage(sitk_img, nii_path)
             logging.info(f"Saved {out_prefix}.npy and {out_prefix}.nii.gz")
@@ -789,20 +814,21 @@ class analysisData:
         _save_nii_npy(map_dz, dz_sitk, "distortion_dz")
         _save_nii_npy(map_dr, dr_sitk, "distortion_dr")
         _save_nii_npy(mask, mask_sitk, "mask")
-        Map3DdistPathJSON={
+        Map3DdistPath={
             "distortion_dx":os.path.join(output_dir, "distortion_dx.nii.gz"),
             "distortion_dy":os.path.join(output_dir, "distortion_dy.nii.gz"),
             "distortion_dz":os.path.join(output_dir, "distortion_dz.nii.gz"),
             "distortion_dr":os.path.join(output_dir, "distortion_dr.nii.gz"),
             "mask":os.path.join(output_dir, "mask.nii.gz"),
         }
-        self.mydatabase.write_query(
-            template_query_write_save_map3Ddistpath.format(
-                id=self.currentId_mri,
-                map3Ddistpath=Map3DdistPathJSON
-            )
-        )        
-    
+        Map3DdistPathJSON=json.dumps(Map3DdistPath)
+        self.mydatabase.write_queryparam(
+            template_query_write_save_map3Ddistpath,
+            (Map3DdistPathJSON,self.currentId_mri)
+        )     
+
+
+
     #############################
     #     Slice-Based JSON      #
     #############################
@@ -834,10 +860,9 @@ class analysisData:
         with open(out_json, 'w') as json_file:
             json.dump(series_metadata, json_file, indent=4, cls=NumpyEncoder)
         logging.info(f"Saved grid positions to {out_json}")
-        self.mydatabase.write_query(template_query_write_save_gridpositions.format(id=self.currentId_mri,
-                                                                                    grids=series_metadata
-                                                                                    )
-                                    )  
+        self.mydatabase.write_queryparam(template_query_write_save_gridpositions,
+                                (json.dumps(series_metadata) ,self.currentId_mri)
+                                )           
     ##############################
     def save_distortions_per_slice_json(self,sorted_slice_distortions, output_dir):
         """
@@ -923,7 +948,6 @@ class analysisData:
 
         
         # 8) Save matched points and distortions
-
         matched_points = {
             'CT_matched_points_mm': ct_matched_mm.tolist(),
             'MRI_matched_points_mm': mri_matched_mm.tolist(),
@@ -935,12 +959,10 @@ class analysisData:
         matched_points_path = os.path.join(self.analyze_Directory, 'matched_points.json')
         with open(matched_points_path, 'w') as f:
             json.dump(matched_points, f, indent=4, cls=NumpyEncoder)
-        self.mydatabase.write_query(
-            template_query_write_save_matchpointpath.format(
-                id=self.currentId_mri,
-                matchpointpath=matched_points_path
-            )
-        )
+
+        self.mydatabase.write_queryparam(template_query_write_save_matchpointpath,
+                                (json.dumps(matched_points_path) ,self.currentId_mri)
+                                )            
         logging.info(f"8. Saved matched points and distortions to {matched_points_path}")
 
         # 9) Compute and save slice-based distortions
@@ -1130,8 +1152,10 @@ def main(id=-1):
         id_mri=int(sys.argv[2])
     else :
         id_mri=id
-    ##############################################################################
-    ### Find Path and Name of Files
+    ################################
+    #  Find Path and Name of Files #
+    ################################
+
     mydatabase=DataBase(host=db_host,port=db_port,database=db_name,user=db_user,password=db_password)
     currentId_ct=id_ct
     currentId_mri=id_mri
@@ -1139,7 +1163,7 @@ def main(id=-1):
     logging.info(f'current mri Id:{currentId_mri}')
     if (currentId_ct != 0):
         readid_ct=mydatabase.read_query(template_query_read_directory.format(id=currentId_ct))
-        ct_Directory=readid_ct[0]['directory']
+        ct_Directory=json.loads(readid_ct[0]['directory'])
         ct_nifti_Directory=os.path.join(Path(ct_Directory),'Nifti')
         # ct_nifti_Directory=f'{ct_nifti_Directory}'.replace('\\','\\\\')
         ct_nifti_files=[f for f in os.listdir(ct_nifti_Directory) if (f.endswith('.nii.gz')and (not f.startswith('registeredImage_')))]
@@ -1151,7 +1175,7 @@ def main(id=-1):
     logging.info(f">>>>>>CT File:{ct_nifti_file}")  
 
     readid_mri=mydatabase.read_query(template_query_read_directory.format(id=currentId_mri))
-    mri_Directory=readid_mri[0]['directory']
+    mri_Directory=json.loads(readid_mri[0]['directory'])
     mri_nifti_Directory=os.path.join(Path(mri_Directory),'Nifti')
     # mri_nifti_Directory=f'{mri_nifti_Directory}'.replace('\\','\\\\')
     mri_nifti_files=[f for f in os.listdir(mri_nifti_Directory) if (f.endswith('.nii.gz')and (not f.startswith('registeredImage_')))]
@@ -1160,32 +1184,37 @@ def main(id=-1):
     logging.info(f">>>>>>MRI File: {mri_nifti_file}")  
     mri_analyze_Directory=os.path.join(Path(mri_Directory),'analyze')
     os.makedirs(mri_analyze_Directory,exist_ok=True)
-    ##############################################################################
-    ### Write start of analysis in DB
-    mydatabase.write_query(template_query_write_save_status.format(id=currentId_mri,
-                                                                                status="analyzing"
-                                                                                )
-                                    )
-    ##############################################################################
-    ###  Registeration
+    #################################
+    # Write start of analysis in DB #
+    #################################
+    
+    mydatabase.write_queryparam(template_query_write_save_status,
+                                (json.dumps("analyzing") ,currentId_mri)
+                                )
+    #################################
+    # Registeration Start Here      #
+    #################################
+    
+    logging.info("A. Start Registeration ...")
     registered_mri_nifti_file=os.path.join(mri_nifti_Directory,'registeredImage_'+mri_nifti_files[0])
     registered_mri_nifti_file=f'{registered_mri_nifti_file}'.replace('\\','\\\\')
     registerImages(ct_nifti_path=ct_nifti_file,mri_nifti_path=mri_nifti_file,registered_mri_nifti_path=registered_mri_nifti_file)
-    logging.info("A. Registeration was done!!!!")
-    ##############################################################################
-    ###  Analysis
+
+    #################################
+    # Analysis start                #
+    #################################
+    logging.info("B. Starting Analysis ...")
     analysisData(mydatabase,currentId_mri,mri_analyze_Directory,ct_nifti_path=ct_nifti_file,mri_nifti_path=registered_mri_nifti_file)
-    logging.info("B. Analysis was done!!!!")
-    ##############################################################################
-    ### Write end of analysis in DB
-    mydatabase.write_query(template_query_write_save_status.format(id=currentId_mri,
-                                                                                status="analyzed"
-                                                                                )
+    #################################
+    # Write End of analysis in DB   #
+    #################################
+    mydatabase.write_queryparam(template_query_write_save_status,
+                                (json.dumps("analyzed"),currentId_mri )
                                 )        
     mydatabase.close()        
     ##################################################################################
     return
 
 if __name__=="__main__":
-    main(93)
+    main(99)
     sys.exit()

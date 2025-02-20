@@ -19,7 +19,11 @@ import datetime
 from Database import DataBase
 
 template_query_read_directory="SELECT * FROM uploads WHERE id={id}"
-template_query_write_save_info_directory="INSERT  INTO studies (userId,info,directory,status,created_at) VALUES ({userId},\"{metadata}\",\"{directory}\",\"non\",\"{created_at}\")"
+# template_query_write_save_info_directory="INSERT  INTO studies (userId,info,directory,status,created_at) VALUES ({userId},\"{metadata}\",\"{directory}\",\"non\",\"{created_at}\")"
+template_query_write_save_info_directory="""
+                                        INSERT  INTO studies (userId,info,directory,status,created_at) 
+                                        VALUES ( %s , %s , %s ,\"non\", %s )
+                                        """
 
 # BaseAddress="/home/mehdi/Documents/Gphantom2/python_scripts/dicoms"
 BaseAddress="E:/PostDoc/__Works/Dr.Fatemi/G_phantom/Software/dicoms"
@@ -231,11 +235,18 @@ class sortData:
             metafile=self.extract_dicom_metadata(temp_file_path)
             str_dir=f'{series_output_dir}'.replace('\\','\\\\')
 
-            self.mydatabase.write_query(template_query_write_save_info_directory.format(userId=self.currentUserId,
-                                                                                        metadata=metafile,
-                                                                                        directory=str_dir,
-                                                                                        created_at=datetime.datetime.now()
-                                                                                        ))
+            # self.mydatabase.write_query(template_query_write_save_info_directory.format(userId=self.currentUserId,
+            #                                                                             metadata=metafile,
+            #                                                                             directory=str_dir,
+            #                                                                             created_at=datetime.datetime.now()
+            #                                                                             ))
+            self.mydatabase.write_queryparam(template_query_write_save_info_directory,
+                                        (self.currentUserId,
+                                        json.dumps(metafile),
+                                        json.dumps(series_output_dir),
+                                        datetime.datetime.now()
+                                        )
+                                        )            
         print("===========================")
 
     def separate_data(self):
@@ -272,5 +283,5 @@ def main(id=-1):
 
 
 if __name__=="__main__":
-    main()
+    main(40)
     sys.exit()
